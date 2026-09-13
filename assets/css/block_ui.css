@@ -1,0 +1,62 @@
+/* Use the native opaque panel, then specialize only this block's internal layout. */
+.audio-play-ui.block-config-modal { display: flex; flex-direction: column; width: min(720px, calc(100vw - 40px)); max-height: calc(100dvh - 40px); margin-inline: auto; background: var(--panel, #fff); color: var(--ink, #252b36); }
+.audio-play-ui .audio-play-header { flex: 0 0 auto; padding: 20px 24px; }
+.audio-play-ui .audio-play-header h2 { margin: 5px 0 0; overflow-wrap: anywhere; }
+.audio-play-ui .audio-play-header > button { flex-shrink: 0; }
+.audio-play-ui .audio-play-body { display: flex; flex-direction: column; gap: 18px; padding: 20px 24px; overflow: auto; min-height: 0; }
+.audio-play-ui .audio-play-body > * { flex-shrink: 0; }
+.audio-play-ui .audio-play-section-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 14px; }
+.audio-play-ui h3 { font-size: 14px; margin: 0; }
+.audio-play-ui label { display: flex; flex-direction: column; gap: 8px; min-width: 0; font-size: 13px; line-height: 1.4; color: var(--ink); }
+.audio-play-ui input:not([type="checkbox"]):not([type="range"]) { width: 100%; min-width: 0; min-height: 40px; box-sizing: border-box; font: inherit; }
+.audio-play-ui .audio-play-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 16px; margin-top: 16px; align-items: start; }
+.audio-play-ui .audio-play-check { display: flex; flex-direction: row; align-items: center; gap: 10px; min-height: 40px; margin-top: 24px; cursor: pointer; }
+.audio-play-ui .audio-play-check input[type="checkbox"] { width: 18px; height: 18px; min-height: 0; flex: 0 0 18px; margin: 0; accent-color: var(--accent-strong); }
+.audio-play-ui .audio-play-live { padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-soft); }
+.audio-play-ui .audio-play-badge { padding: 4px 8px; border-radius: 6px; background: var(--panel); color: var(--muted-strong); font-size: 11px; font-weight: 500; }
+.audio-play-ui .audio-play-status { margin: 0 0 18px; font-size: 13px; line-height: 1.5; color: var(--muted-strong); overflow-wrap: anywhere; }
+.audio-play-ui .audio-play-volume-row { display: flex; gap: 20px; align-items: center; }
+.audio-play-ui .audio-play-volume-label { flex: 1; }
+.audio-play-ui .audio-play-volume-label > span { display: flex; justify-content: space-between; gap: 8px; }
+.audio-play-ui [data-player-volume-value] { font-variant-numeric: tabular-nums; color: var(--muted-strong); }
+.audio-play-ui input[type="range"] { width: 100%; min-width: 0; min-height: 24px; padding: 0; margin: 0; box-shadow: none; border: 0; accent-color: var(--accent-strong); }
+.audio-play-ui .audio-play-volume-row button { flex: 0 0 auto; min-height: 40px; }
+.audio-play-ui .audio-play-help { margin: 0; color: var(--muted-strong); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.audio-play-ui .audio-play-live > .audio-play-help { margin-top: 16px; }
+.audio-play-ui .audio-play-command-note { border: 1px solid var(--line); border-left: 3px solid var(--muted-strong); border-radius: 8px; padding: 12px 14px; background: var(--panel-soft); color: var(--ink); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.audio-play-ui .audio-play-command-note p { margin: 6px 0 0; }
+.audio-play-ui .audio-play-command-note code { white-space: normal; overflow-wrap: anywhere; }
+.cw-block-inspector.audio-play-ui .audio-play-command-note { margin-top: 16px; }
+.audio-play-ui .audio-play-disclosure { min-width: 0; border: 1px solid var(--line); border-radius: 10px; }
+.audio-play-ui .audio-play-disclosure > summary { padding: 13px 16px; cursor: pointer; font-size: 13px; font-weight: 600; }
+.audio-play-ui .audio-play-disclosure-body { padding: 0 16px 16px; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.audio-play-ui .audio-play-disclosure-body > p { margin: 0 0 10px; }
+.audio-play-ui .audio-play-disclosure-body .audio-play-fields { margin-top: 0; }
+.audio-play-ui .audio-play-advanced { margin-top: 16px; }
+.audio-play-ui .audio-play-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 10px 16px; flex: 0 0 auto; padding: 16px 24px; border-top: 1px solid var(--line); background: var(--panel); }
+.audio-play-ui .audio-play-actions p { flex: 1 1 160px; margin: 0; color: var(--muted-strong); font-size: 12px; line-height: 1.5; }
+.audio-play-ui .audio-play-actions button { min-width: 112px; margin-left: auto; }
+.audio-play-ui :is(button, input, summary):focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 3px; }
+.audio-play-ui button:disabled, .audio-play-ui input:disabled { opacity: .55; cursor: not-allowed; }
+.audio-play-ui [data-error="true"], .audio-play-card [data-error="true"] { color: var(--danger-ink); }
+.audio-play-ui .audio-play-diagnostics .block-modal-error-tabs { padding: 0; border-top: 0; background: transparent; }
+.audio-play-ui .audio-play-diagnostics .block-modal-error-panel { padding: 8px 0 0; background: transparent; }
+.cw-block-inspector.audio-play-ui section { margin-top: 16px; }
+.cw-block-inspector.audio-play-ui .audio-play-actions { padding: 8px 0; border-top: 0; }
+.cw-block-inspector.audio-play-ui .audio-play-fields { grid-template-columns: minmax(0, 1fr); }
+.cw-block-inspector.audio-play-ui .audio-play-check { margin-top: 0; }
+.cw-block-inspector.audio-play-ui .audio-play-live h3 { margin-bottom: 12px; }
+.cw-block-inspector.audio-play-ui .audio-play-live button { margin-top: 8px; }
+.audio-play-card { display: flex; flex-direction: column; gap: 6px; max-width: 210px; text-align: center; }
+.audio-play-card small { white-space: normal; overflow-wrap: anywhere; }
+@media (max-width: 560px) {
+  .audio-play-ui.block-config-modal { width: calc(100vw - 40px); }
+  .audio-play-ui .audio-play-header, .audio-play-ui .audio-play-actions { padding: 14px 16px; }
+  .audio-play-ui .audio-play-header h2 { font-size: 18px; }
+  .audio-play-ui .audio-play-body { padding: 16px; gap: 14px; }
+  .audio-play-ui .audio-play-live { padding: 14px; }
+  .audio-play-ui .audio-play-volume-row { flex-wrap: wrap; gap: 12px; }
+  .audio-play-ui .audio-play-volume-label { flex-basis: 100%; }
+  .audio-play-ui .audio-play-fields { grid-template-columns: minmax(0, 1fr); }
+  .audio-play-ui .audio-play-check { margin-top: 0; }
+}
