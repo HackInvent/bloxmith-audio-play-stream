@@ -1,7 +1,7 @@
 # Audio Play Stream
 
 <!-- block-metadata:start -->
-[![Block version: 0.1.0](https://img.shields.io/badge/block-0.1.0-blue)](model.json)
+[![Block version: 0.1.1](https://img.shields.io/badge/block-0.1.1-blue)](model.json)
 [![BloxSmith compatibility: 1.0.9](https://img.shields.io/badge/BloxSmith-1.0.9-brightgreen)](compatibility.json)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
@@ -26,15 +26,13 @@ The visual order of `audio_in` (ID 1) and `command_in` (ID 2) is unrestricted. T
 
 Use headphones to avoid feedback between a microphone and speakers on the same computer. The card, properties modal and inspector control the same player; closing them does not stop audio. Playback also works without an open modal and inside a closed composite. Each browser has an independent subscription and local settings; browsers are not synchronized, and late subscribers receive no audio history.
 
-## Interruption commands: accepted, but browser interruption is unavailable
+## Immediate interruption commands
 
 `command_in` accepts only `{"action":"interrupt"}`, with a maximum payload of 4 KiB. It rejects start/stop commands, extra fields and invalid JSON. A command can arrive without audio or another ready input. Only the current event or a freshly updated value is processed; consumed or cached commands are not replayed.
 
-**The command does not yet stop sound or clear the queue.** The framework has no public bridge from worker commands to the browser runtime. The block reports this limitation in its properties and inspector, without polling or embedding hidden commands in audio.
+In Active Runtime the block calls its node-scoped `reset_browser_audio` service. Each attached browser stops already scheduled sources, clears PCM/container buffers, invalidates pending decoder work and remains subscribed for later audio. The result reports `audio_play_stream.command.applied: true` and the number of readers for which a reset was scheduled. This count is transport acknowledgement, not proof of audible silence.
 
-In Active Runtime the result is `skipped`, with `audio_play_stream.command.applied: false` and `reason: "browser_command_bridge_unavailable"`. Commands do not change gain or playback. Local mute and global Stop retain their existing behavior.
-
-Existing audio-only nodes still execute and are not migrated automatically. Recreate the node and reconnect it to obtain `command_in`; doing so does not remove the browser-bridge limitation.
+Simulation validates the command without opening audio and reports `applied: false` with `reason: "simulation"`. Local mute and global Stop retain their existing behavior.
 
 ## Formats and limits
 
@@ -67,7 +65,7 @@ Local volume and mute/unmute act immediately in that browser without saving conf
 
 ## Runtime and architecture
 
-- **Active Runtime (`zeromq_active`)**: the generic host starts `audio_play_streamBrowserRuntime` on Run with the wired audio input and cancellation signal. The worker remains available. Data messages activate it separately through `on_each_event`, without waiting for audio.
+- **Active Runtime (`zeromq_active`)**: the generic host starts the release-owned browser runtime module on Run with the wired audio input and cancellation signal. The worker remains available. Data messages activate it separately through `on_each_event`, without waiting for audio.
 - **One Shot Simulation (`centralized`)**: `skipped`, with no playback, subscription, fake output or browser side effect. A valid command is checked but reports `applied: false`, `reason: "simulation"`. The mini-graph remains runnable.
 - No API key, temporary file, disk access, server-side playback, CDN or added dependency.
 - `block.py` uses only the public `bloxsmith_app.block_api`.
@@ -91,7 +89,7 @@ Sample-by-sample comparisons against **libopus through FFmpeg** cover mono/stere
 
 The TTS suite `F5.49_opus_interoperability.py` additionally decodes actual TTS output pages through runtime egress, checking exact duration after pre-skip and final trimming in mono/stereo; only the OpenAI API is simulated.
 
-A real Text → Python JSON → Audio Play mini-graph checks commands in both modes without audio or external APIs: fresh/cached/invalid commands, legacy nodes and the unapplied-interruption diagnostic. Reordered inputs, duplicate IDs and altered contracts are tested while preserving legacy audio-only nodes and user-selected visual order.
+A real Text → Python JSON → Audio Play mini-graph checks commands in both modes without audio or external APIs: fresh/cached/invalid commands, legacy nodes and the node-scoped reset result. Reordered inputs, duplicate IDs and altered contracts are tested while preserving legacy audio-only nodes and user-selected visual order.
 
 ## Compatibility policy
 

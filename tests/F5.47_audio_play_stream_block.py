@@ -13,6 +13,7 @@ import sys
 import time
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
@@ -22,23 +23,23 @@ from blocs.microphone_stream.block import MicrophoneStreamBlock
 from blocs.registry import get_block_definition
 from bloxsmith_app.block_api import BlockRuntimeContext
 from bloxsmith_app.block_runtime import BlockInputEvent
-from bloxsmith_app.block_ui import declared_block_ui_assets
 from bloxsmith_app.graph import WorkflowGraph
-from bloxsmith_app.graph_introspection import list_block_kinds
 from bloxsmith_app.orchestrator import WorkflowOrchestrator
-from ui_smoke_common import create_project_api, graph_payload, project_editor_url, run_playwright_smoke
+from ui_smoke_common import create_project_api, graph_payload, http_json, project_editor_url, run_playwright_smoke
 from block_test_artifacts import artifact_path
+from block_test_packages import install_test_package, release_key, surface_payload
 
 BLOCK = AudioPlayStreamBlock()
 
 
 def context_for(mode="zeromq_active", **values):
     """Build a public context with current ports and optional input events/values for activation tests."""
+    services = values.pop("services", {})
     return BlockRuntimeContext(
         run_id="audio-play-test", node_id="player", kind=BLOCK.kind, title=BLOCK.default_title(),
         config=dict(DEFAULTS), runtime_mode=mode,
         input_ports=tuple(SimpleNamespace(**port) for port in BLOCK.model["ports"]["inputs"]),
-        output_ports=(), services={}, root_dir=ROOT, **values,
+        output_ports=(), services=services, root_dir=ROOT, **values,
     )
 
 
@@ -82,13 +83,12 @@ def test_contract_settings_and_assets():
     assert result["node_patch"]["config"]["muted"] is True
     for values in ({"title": " "}, {"config": {"unknown": True}}, {"config": {"muted": 1}}):
         assert "error" in BLOCK.handle_ui_action(node=current, action="save_properties", values=values)
-    catalog = next(item for item in list_block_kinds() if item["kind"] == BLOCK.kind)
-    assert catalog["browser_runtime"] == {"audio_output": True}
-    assert catalog["browser_runtime_assets"] == BLOCK.ui_assets("browser_runtime")
-    declared = declared_block_ui_assets(BLOCK.kind, None)
+    assert BLOCK.model["browser_runtime"] == {"audio_output": True}
     for surface in ("modal", "inspector_panel", "node_card", "browser_runtime"):
-        for asset in BLOCK.ui_assets(surface):
-            assert asset in declared and (BLOCK.directory / asset["path"]).is_file()
+        assets = BLOCK.model["ui_assets"][surface]
+        assert assets
+        for asset in assets:
+            assert (BLOCK.directory / asset["path"]).is_file()
     for render in (BLOCK.render_modal, BLOCK.render_inspector_panel, BLOCK.render_node_card):
         html = render(node={**current, "title": '<script>alert("x")</script>'})["html"]
         assert "<script>" not in html and "data-player-status" in html and "{{" not in html, html
@@ -100,7 +100,7 @@ def test_contract_settings_and_assets():
     assert BLOCK.model["runtime"]["active_execution_policy"] == "on_each_event"
     assert len(BLOCK.default_inputs()) == 2
     for render in (BLOCK.render_modal, BLOCK.render_inspector_panel):
-        assert "Interruption par commande indisponible" in render(node=current)["html"]
+        assert "Interruption immédiate" in render(node=current)["html"]
         assert "Recréez-le" in render(node={**current, "inputs": current["inputs"][:1]})["html"]
 
 
@@ -109,14 +109,22 @@ def test_port_order():
     for mode in ("centralized", "zeromq_active"):
         base = context_for(mode)
         for ports in (base.input_ports, base.input_ports[::-1]):
-            ctx = replace(context_for(mode), input_ports=ports)
+            resets = []
+            services = {"reset_browser_audio": lambda: resets.append(True) or {"scheduled_readers": 2}} if mode == "zeromq_active" else {}
+            ctx = replace(context_for(mode, services=services), input_ports=ports)
             before = [vars(p).copy() for p in ports]
             assert BLOCK.prepare_runtime(ctx).keep_alive == (mode == "zeromq_active")
             ctx.input_attribute("command_in").update('{"action":"interrupt"}')
             result = BLOCK.execute_runtime(ctx)
-            assert result.status == "skipped" and not result.outputs
-            assert result.metadata[BLOCK.kind]["command"] == {"action": "interrupt", "applied": False,
-                "reason": "browser_command_bridge_unavailable" if mode == "zeromq_active" else "simulation"}
+            assert result.status == ("success" if mode == "zeromq_active" else "skipped") and not result.outputs
+            expected = {"action": "interrupt", "applied": mode == "zeromq_active"}
+            if mode == "zeromq_active":
+                expected["scheduled_readers"] = 2
+                assert resets == [True]
+            else:
+                expected["reason"] = "simulation"
+                assert not resets
+            assert result.metadata[BLOCK.kind]["command"] == expected
             assert [vars(p) for p in ctx.input_ports] == before
         legacy = replace(context_for(mode), input_ports=base.input_ports[:1])
         assert BLOCK.prepare_runtime(legacy).keep_alive == (mode == "zeromq_active")
@@ -142,20 +150,26 @@ def test_port_order():
 
 
 def test_explicit_commands():
-    """FB1/FB2/FB6: validate fresh interruptions without IO, playback claims, replay or legacy migration."""
+    """FB1/FB2/FB6: apply fresh interruptions once; reject replay, malformed data and missing bridges."""
+    event = BlockInputEvent(edge_id="commands", input_port_id=2, input_port_name="command_in",
+        source_node_id="control", source_port_id=1, value='{"action":"interrupt"}',
+        content_type="application/json", sequence=1)
     for mode in ("centralized", "zeromq_active"):
-        reason = "simulation" if mode == "centralized" else "browser_command_bridge_unavailable"
-        event = BlockInputEvent(edge_id="commands", input_port_id=2, input_port_name="command_in",
-            source_node_id="control", source_port_id=1, value='{"action":"interrupt"}',
-            content_type="application/json", sequence=1)
         for values in ({"input_events": (event,)}, {"inputs": {"command_in": event.value}}):
-            context = context_for(mode, **values)
+            resets = []
+            services = {"reset_browser_audio": lambda: resets.append(True) or {"scheduled_readers": 3}} if mode == "zeromq_active" else {}
+            context = context_for(mode, services=services, **values)
             result = BLOCK.execute_runtime(context)
-            assert result.status == "skipped" and not result.outputs and not context.services
-            assert result.metadata[BLOCK.kind]["command"] == {
-                "action": "interrupt", "applied": False, "reason": reason}
+            assert result.status == ("success" if mode == "zeromq_active" else "skipped")
+            assert not result.outputs
+            expected = {"action": "interrupt", "applied": mode == "zeromq_active"}
             if mode == "zeromq_active":
-                assert "son et la file de lecture restent inchangés" in result.last_message
+                expected["scheduled_readers"] = 3
+                assert resets == [True]
+            else:
+                expected["reason"] = "simulation"
+                assert not resets
+            assert result.metadata[BLOCK.kind]["command"] == expected
         stale = context_for(mode, inputs={"command_in": event.value})
         stale.mark_inputs_consumed()
         assert "command" not in BLOCK.execute_runtime(stale).metadata[BLOCK.kind]
@@ -175,6 +189,13 @@ def test_explicit_commands():
             ports = context_for(mode).input_ports
             altered = SimpleNamespace(**{**vars(ports[1]), **change})
             assert BLOCK.execute_runtime(replace(context_for(mode), input_ports=(ports[0], altered))).status == "failed"
+
+    missing = context_for("zeromq_active", input_events=(event,))
+    assert BLOCK.execute_runtime(missing).metadata[BLOCK.kind]["command"]["reason"] == "reset_browser_audio_unavailable"
+    malformed = context_for("zeromq_active", input_events=(event,), services={"reset_browser_audio": lambda: {"scheduled_readers": True}})
+    assert BLOCK.execute_runtime(malformed).metadata[BLOCK.kind]["command"]["reason"] == "reset_browser_audio_failed"
+    raised = context_for("zeromq_active", input_events=(event,), services={"reset_browser_audio": lambda: (_ for _ in ()).throw(RuntimeError("reset refused"))})
+    assert BLOCK.execute_runtime(raised).metadata[BLOCK.kind]["command"]["reason"] == "reset_browser_audio_failed"
 
 
 def test_command_graph_modes():
@@ -200,9 +221,9 @@ def test_command_graph_modes():
             while time.monotonic() < deadline and not active.results.get("player", {}).get(BLOCK.kind, {}).get("command"):
                 time.sleep(.02)
             command = active.results.get("player", {}).get(BLOCK.kind, {}).get("command")
-            assert command == {"action": "interrupt", "applied": False,
-                               "reason": "browser_command_bridge_unavailable"}, (active.results, active.logs)
-            # Active workers acknowledge skipped results as a successful batch; applied:false is the effect contract.
+            assert command == {"action": "interrupt", "applied": True,
+                               "scheduled_readers": 0}, (active.results, active.logs)
+            # The node-scoped reset is successful even when no browser reader is currently attached.
             assert active.node_statuses["player"] not in {"failed", "cancelled"}, dict(active.node_statuses)
             assert active.output_values.get("player", {}) == {}
         finally:
@@ -281,11 +302,26 @@ def reference_pcm(encoded_fixtures):
 
 
 def test_browser(page, server, blocking_errors):
-    """FB3/FB4/FB5: actual WebCodecs fidelity, bounded decoding and Web Audio scheduling in Chromium."""
+    """FB3/FB4/FB5/FB6: real managed modules, decoding, playback reset and Web Audio scheduling."""
+    model = install_test_package(server, "audio_play_stream")
+    key = quote(release_key(model), safe="")
+    asset_base = f"{server.base_url}/api/blocks/{key}/assets"
+    current = node(BLOCK, "player")
+    current["block_version"] = model["version"]
+    surfaces = {surface: surface_payload(server, model, current, surface)
+                for surface in ("modal", "inspector_panel", "node_card")}
+    catalog = next(item for item in http_json(server.base_url, "/api/blocks")["blocks"]
+                   if item["kind"] == release_key(model))
+    browser_assets = catalog["browser_runtime_assets"]
+    asset_url = lambda assets, suffix: f"{asset_base}/" + next(
+        item["path"] for item in assets if item["path"].endswith(suffix))
+    modules = {
+        "common": asset_url(browser_assets, "/assets/js/common.js"),
+        "browserRuntime": asset_url(browser_assets, "/assets/js/browser_runtime.js"),
+        "modal": asset_url(surfaces["modal"]["assets"], "/assets/js/block_modal.js"),
+    }
     page.goto(server.base_url)
     page.set_content('<button id="activate">Audio</button><div id="surface"></div>')
-    for name in ("common", "opus_demux", "browser_runtime", "block_modal", "inspector_panel", "node_card"):
-        page.add_script_tag(content=(BLOCK.directory / f"assets/js/{name}.js").read_text())
     page.evaluate("""() => {
       document.querySelector('#activate').onclick = async () => {
         window.testAudio = new AudioContext({ sampleRate: 48000 });
@@ -296,17 +332,19 @@ def test_browser(page, server, blocking_errors):
     page.wait_for_function("window.testAudio?.state === 'running'")
     media = fixtures(include_speech=True)
     result = page.evaluate((BLOCK.directory / "tests/browser_test.js").read_text(), {
-        "fixtures": media, "references": reference_pcm(media), "modal": BLOCK.render_modal(node=node(BLOCK, "player"))["html"],
+        "fixtures": media, "references": reference_pcm(media),
+        "modal": BLOCK.render_modal(node=current)["html"], "modules": modules,
     })
     assert result["passed"], result
     print(f"[ok] Opus waveform fidelity vs FFmpeg: {result['fidelity']}", flush=True)
     print("[ok] Native browser PCM/Opus/MediaRecorder, controls and cleanup", flush=True)
-    test_editor_path(page, server)
+    test_editor_path(page, server, model, modules)
 
 
-def test_editor_path(page, server):
-    """FB1–FB5: real editor Run → browser ingress → audio edge → autonomous browser playback."""
+def test_editor_path(page, server, model, modules):
+    """FB1–FB6: real editor Run → audio edge → managed browser playback and Stop."""
     nodes = [MicrophoneStreamBlock().build_node_payload(node_id="micro"), BLOCK.build_node_payload(node_id="player")]
+    nodes[1]["block_version"] = model["version"]
     nodes[0]["position"] = {"x": 150, "y": 180}
     nodes[1]["position"] = {"x": 530, "y": 180}
     document = graph_payload("Audio playback integration", nodes, [
@@ -323,10 +361,13 @@ def test_editor_path(page, server):
     assert response.value.ok and run.get("run_id"), run
     scope = {"workspaceProjectId": workspace_project_id, "graphId": graph_id, "instanceId": "1",
              "runId": run["run_id"], "nodeId": "player"}
-    page.wait_for_function("window.CWAudioPlayStream !== undefined")
     if page.locator("#browserAudioUnlockButton").is_visible():
         page.click("#browserAudioUnlockButton")
-    page.wait_for_function("scope => window.CWAudioPlayStream.get(window.CWAudioPlayStream.key(scope))?.player?.snapshot().active", arg=scope)
+    module_scope = {"url": modules["common"], "scope": scope}
+    page.wait_for_function(
+        "async data => { const ui = await import(data.url); return ui.get(ui.key(data.scope))?.player?.snapshot().active; }",
+        arg=module_scope,
+    )
     # No modal was opened: the framework host alone must have attached the player.
     assert page.locator('.canvas-node[data-node-id="player"] [data-player-mute]').is_enabled()
     page.evaluate("""async ({scope, encoded}) => {
@@ -339,12 +380,21 @@ def test_editor_path(page, server):
       }
       source.close();
     }""", {"scope": scope, "encoded": fixtures()["webm_1"]})
-    page.wait_for_function("scope => window.CWAudioPlayStream.get(window.CWAudioPlayStream.key(scope))?.player?.snapshot().playedSamples === 48000", arg=scope)
+    page.wait_for_function(
+        "async data => { const ui = await import(data.url); return ui.get(ui.key(data.scope))?.player?.snapshot().playedSamples === 48000; }",
+        arg=module_scope,
+    )
     card_mute = page.locator('.canvas-node[data-node-id="player"] [data-player-mute]')
     card_mute.click()
-    assert page.evaluate("scope => window.CWAudioPlayStream.get(window.CWAudioPlayStream.key(scope)).player.snapshot().muted", scope)
+    assert page.evaluate(
+        "async data => { const ui = await import(data.url); return ui.get(ui.key(data.scope)).player.snapshot().muted; }",
+        module_scope,
+    )
     page.click("#stopRunButton")
-    page.wait_for_function("scope => !window.CWAudioPlayStream.get(window.CWAudioPlayStream.key(scope))?.player", arg=scope)
+    page.wait_for_function(
+        "async data => { const ui = await import(data.url); return !ui.get(ui.key(data.scope))?.player; }",
+        arg=module_scope,
+    )
     assert card_mute.is_disabled()
     print("[ok] Real editor/browser ingress/graph edge/browser egress/Stop", flush=True)
     test_modal_layout(page)
@@ -376,7 +426,7 @@ def test_modal_layout(page):
         assert not modal.locator(".audio-play-advanced").evaluate("element => element.open")
         notice = modal.locator("[data-player-command-notice]")
         notice.scroll_into_view_if_needed()
-        assert notice.is_visible() and "ne coupe pas le son" in notice.inner_text()
+        assert notice.is_visible() and "arrête immédiatement" in notice.inner_text()
         assert not notice.evaluate("element => element.scrollWidth > element.clientWidth + 1")
         page.screenshot(path=artifact_path(f"audio-play-modal-{label}.png"))
     advanced = modal.locator(".audio-play-advanced summary")
@@ -401,7 +451,7 @@ def test_modal_layout(page):
     inspector.wait_for(state="visible")
     notice = inspector.locator('[data-player-command-notice]')
     notice.scroll_into_view_if_needed()
-    assert notice.is_visible() and "ne coupe pas le son" in notice.inner_text()
+    assert notice.is_visible() and "arrête immédiatement" in notice.inner_text()
     assert not notice.evaluate("element => element.scrollWidth > element.clientWidth + 1")
     assert notice.evaluate("element => element.getBoundingClientRect().right <= innerWidth")
     page.screenshot(path=artifact_path("audio-play-inspector-command.png"))

@@ -1,9 +1,6 @@
 /** Bounded, incremental audio-only Ogg/WebM demuxing. No decoder or IO lives in the framework.
  * Container rules: RFC 7845 / RFC 3533 (Ogg), RFC 9559 (Matroska), RFC 6716 (Opus TOC).
  */
-(function () {
-  "use strict";
-  const ui = window.CWAudioPlayStream;
   const LIMIT = 1024 * 1024;
   const text = bytes => new TextDecoder().decode(bytes);
   const check = (condition, message) => { if (!condition) throw new Error(message); };
@@ -55,7 +52,7 @@
    * @param {number} channels - Channels declared by the graph audio frame.
    * @param {Function} onPacket - Awaited callback receiving a raw Opus packet and trim counts.
    */
-  class OpusDemux {
+  export class OpusDemux {
     constructor(channels, onPacket) {
       this.channels = channels; this.onPacket = onPacket;
       this.buffer = new Uint8Array(); this.format = null;
@@ -255,5 +252,3 @@
         "Flux Opus précédent incomplet ; relancez la lecture.");
     }
   }
-  ui.OpusDemux = OpusDemux;
-})();

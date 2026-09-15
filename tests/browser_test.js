@@ -1,6 +1,8 @@
 /** FB3/FB4/FB5: real WebCodecs/Web Audio, generated audio, UI and lifecycle assertions. */
-async ({ fixtures, references, modal }) => {
-  const ui = window.CWAudioPlayStream;
+async ({ fixtures, references, modal, modules }) => {
+  const ui = await import(modules.common);
+  const runtime = await import(modules.browserRuntime);
+  const modalSurface = await import(modules.modal);
   const assert = (ok, message) => { if (!ok) throw new Error(message); };
   const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
   const context = window.testAudio;
@@ -27,15 +29,24 @@ async ({ fixtures, references, modal }) => {
     const scope = { workspaceProjectId: "workspace", graphId: "graph", instanceId: "1", runId: "run", nodeId: `player-${++nextId}` };
     let callbacks;
     let closes = 0;
+    let generation = new AbortController();
+    abort.signal.addEventListener("abort", () => generation.abort(), { once: true });
     const api = { node: { id: scope.nodeId, config }, audioContext: context, signal: abort.signal,
       runtimeAudioStreams: { getContext: () => scope, async openInput(options) {
         assert(options.inputPort === "audio_in", "wrong port"); callbacks = options;
-        return { close() { closes++; } };
+        assert(typeof options.onReset === "function", "interruptible readers must provide onReset");
+        return { close() { closes++; generation.abort(); } };
       } } };
-    const stop = await window.CWBlockUiBlocks.audio_play_streamBrowserRuntime.start(api);
+    const stop = await runtime.start(api);
     const state = () => { const entry = ui.get(ui.key(scope)); return entry?.player?.snapshot() || entry?.snapshot; };
     return { api, stop, abort, scope, state, player: () => ui.get(ui.key(scope))?.player,
-      send: frame => callbacks.onFrame(frame), get closes() { return closes; }, callbacks };
+      send: frame => callbacks.onFrame(frame, { signal: generation.signal }),
+      reset() {
+        generation.abort();
+        generation = new AbortController();
+        return callbacks.onReset({ type: "runtime_audio_stream.reset" }, { signal: generation.signal });
+      },
+      get closes() { return closes; }, callbacks };
   }
   const frame = (bytes, extra = {}) => ({ payload: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
     stream_id: "audio-1", source_id: "source", sequence: 0, codec: "pcm_s16le", sample_rate_hz: 24000, channels: 1, ...extra });
@@ -72,6 +83,21 @@ async ({ fixtures, references, modal }) => {
   assert(first.closes === 1 && !first.state().active && second.state().active && context.state === "running", "idempotent local cleanup");
   second.abort.abort();
   assert(second.closes === 1 && !second.state().active, "abort closes receiver");
+
+  // FB6: interruption stops scheduled sources, clears stream state and keeps the receiver alive.
+  const interrupted = await open();
+  const interruptedBegin = observed.length;
+  await interrupted.send(frame(new Uint8Array(48000)));
+  const beforeResetFrames = interrupted.state().receivedFrames;
+  interrupted.reset();
+  assert(interrupted.state().active && interrupted.closes === 0, "reset must retain the player subscription");
+  assert(/interrompue/.test(interrupted.state().message), "reset must expose an honest local state");
+  assert(observed.slice(interruptedBegin).every(info => info.stopped && info.disconnected),
+    "reset must stop and disconnect every scheduled source");
+  await interrupted.send(frame(new Uint8Array(480), { sequence: 1 }));
+  assert(interrupted.state().receivedFrames === beforeResetFrames + 1,
+    "new audio must resume after reset, including the same stream id");
+  interrupted.stop();
 
   // FB3: Opus Ogg/WebM, mono/stereo, one-byte headers and fragmented container bodies.
   const decodedResults = {};
@@ -155,10 +181,9 @@ async ({ fixtures, references, modal }) => {
   const bounded = await open({ max_buffer_sec: 1, latency_ms: 20 });
   await bounded.send(frame(new Uint8Array(36000))); // .75 seconds
   const blocked = bounded.send(frame(new Uint8Array(120000), { sequence: 1 }));
-  const cancelled = rejects(() => blocked, /arrêtée/);
   await delay(40);
   assert(bounded.state().highWaterSeconds <= 1.0001, "scheduled queue is bounded");
-  bounded.abort.abort(); await cancelled;
+  bounded.abort.abort(); await blocked;
   assert(!bounded.state().active && bounded.closes === 1, "cancel pending queue");
   for (const invalid of [frame(new Uint8Array(10), { codec: "aac" }),
     frame(new Uint8Array(10), { codec: "opus", sample_rate_hz: 48000 }),
@@ -191,7 +216,7 @@ async ({ fixtures, references, modal }) => {
   window.AudioDecoder = DeferredDecoder;
   try {
     const pending = await open();
-    const rejected = rejects(() => pending.send(opusFrame()), /arrêtée/);
+    const cancelledDecode = pending.send(opusFrame());
     await delay(0);
     const previous = DeferredDecoder.last;
     assert(previous.chunk && pending.state().playedSamples === 0, "Await PCM before accepting the packet");
@@ -205,12 +230,26 @@ async ({ fixtures, references, modal }) => {
     assert(pending.state().playedSamples === 0, "A partial decode must not ACK or play a truncated packet");
     const beforeAbort = performance.now();
     pending.abort.abort();
-    await rejected;
+    await cancelledDecode;
     assert(performance.now() - beforeAbort < 500 && partialClosed && previous.state === "closed",
       "Stop must release a pending decode and partial AudioData without waiting for the timeout");
     let lateClosed = false;
     previous.callbacks.output({ close() { lateClosed = true; } });
     assert(lateClosed && !pending.state().active, "Late PCM after Stop must be closed, never scheduled");
+
+    const resetting = await open();
+    const discarded = resetting.send(opusFrame());
+    await delay(0);
+    const staleDecoder = DeferredDecoder.last;
+    assert(staleDecoder.chunk, "The stale decoder must have pending asynchronous work");
+    resetting.reset();
+    await discarded;
+    assert(staleDecoder.state === "closed" && resetting.state().active && resetting.closes === 0,
+      "reset must invalidate decoder work without closing the reader");
+    let staleClosed = false;
+    staleDecoder.callbacks.output({ close() { staleClosed = true; } });
+    assert(staleClosed, "late decoded audio after reset must be closed, never scheduled");
+    resetting.stop();
 
     const failed = await open();
     const decodeError = rejects(() => failed.send(opusFrame()), /Décodage Opus interrompu/);
@@ -240,7 +279,7 @@ async ({ fixtures, references, modal }) => {
   root.innerHTML = modal;
   const actions = [];
   let readOnly = false;
-  const cleanup = window.CWBlockUiBlocks.audio_play_stream.mount(root, {
+  const cleanup = modalSurface.mount(root, {
     runtimeAudioStreams: live.api.runtimeAudioStreams, isReadOnly: () => readOnly,
     async applyAction(action, values) { actions.push({ action, values }); return {}; },
   });

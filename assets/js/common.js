@@ -1,25 +1,21 @@
 /** Shared, page-local controls. Neither runtime state nor gain is persisted to the graph. */
-(function () {
-  "use strict";
-  if (window.CWAudioPlayStream) return;
-  const sessions = new Map();
-  const subscribers = new Set();
-  const ui = (window.CWAudioPlayStream = {});
+const sessions = new Map();
+const subscribers = new Set();
 
   /** Key the local player by all public scopes, including the current Run. */
-  ui.key = (scope) => JSON.stringify([scope.workspaceProjectId, scope.graphId, scope.instanceId,
+export const key = (scope) => JSON.stringify([scope.workspaceProjectId, scope.graphId, scope.instanceId,
     scope.runId, scope.nodeId]);
-  ui.get = (key) => sessions.get(key);
-  ui.notify = () => { for (const refresh of subscribers) refresh(); };
+export const get = (sessionKey) => sessions.get(sessionKey);
+export const notify = () => { for (const refresh of subscribers) refresh(); };
   /** Keep only bounded diagnostic snapshots after cleanup, never disposed audio resources. */
-  ui.set = (key, record) => {
-    sessions.delete(key);
-    sessions.set(key, record);
+export const set = (sessionKey, record) => {
+  sessions.delete(sessionKey);
+  sessions.set(sessionKey, record);
     for (const [oldKey, old] of sessions) {
       if (sessions.size <= 128) break;
       if (!old.player) sessions.delete(oldKey);
     }
-    ui.notify();
+  notify();
   };
 
   /** Bind live controls and validated next-Run settings to a modal, inspector or card.
@@ -27,7 +23,7 @@
    * @param {object} api - Public block UI facade; no private routes or shared shell changes.
    * @returns {Function} Remove only UI subscriptions; closing a surface never stops audio.
    */
-  ui.mount = function mount(root, api) {
+export function mountControls(root, api) {
     const fields = Array.from(root.querySelectorAll("[data-player-setting]"));
     const title = root.querySelector("[data-player-title]");
     const controls = title ? [title, ...fields] : fields;
@@ -43,7 +39,7 @@
       fields.map(field => [field.dataset.playerSetting, field.type === "checkbox" ? field.checked : field.value])) });
     let saved = JSON.stringify(snapshot());
     const changed = () => JSON.stringify(snapshot()) !== saved;
-    const record = () => ui.get(ui.key(api.runtimeAudioStreams?.getContext?.() || {}));
+  const record = () => get(key(api.runtimeAudioStreams?.getContext?.() || {}));
     /** Refresh local state without replacing user edits or changing graph configuration. */
     const refresh = () => {
       if (disposed) return;
@@ -111,5 +107,4 @@
       mute?.removeEventListener("click", toggleMute);
     }
     return cleanup;
-  };
-})();
+}

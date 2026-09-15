@@ -16,10 +16,6 @@ from bloxsmith_app.block_api import (
 
 DEFAULTS = {"volume": 80, "muted": False, "latency_ms": 100, "max_buffer_sec": 5}
 BOUNDS = {"volume": (0, 100), "latency_ms": (20, 1000), "max_buffer_sec": (1, 10)}
-COMMAND_UNAVAILABLE = (
-    "Commande interrupt reçue mais non appliquée : la passerelle de commandes vers le navigateur "
-    "n’est pas disponible. Le son et la file de lecture restent inchangés."
-)
 _NO_COMMAND = object()
 
 
@@ -76,7 +72,7 @@ def _config(raw: Mapping[str, Any] | None) -> dict[str, Any]:
 # FB3 - Decode PCM16 and containerized Opus incrementally with bounded local scheduling.
 # FB4 - Local volume/mute, explicit errors and complete cleanup on runtime cancellation.
 # FB5 - Own all UI surfaces, validated settings, discovery and end-user documentation.
-# FB6 - Validate fresh interrupt commands and report the missing bridge without pretending playback stopped.
+# FB6 - Validate fresh interrupt commands and request a node-scoped browser playback reset.
 class AudioPlayStreamBlock(BlockDefinition):
     """Play graph audio independently in each browser through the public egress facade."""
 
@@ -112,7 +108,7 @@ class AudioPlayStreamBlock(BlockDefinition):
         return BlockRuntimePreparation(keep_alive=context.runtime_mode == "zeromq_active")
 
     def execute_runtime(self, context: BlockRuntimeContext) -> BlockRuntimeResult:
-        """Validate fresh commands and report browser ownership, never claim unsupported playback effects."""
+        """Validate fresh commands and request browser playback reset through the public service."""
         try:
             self._validate_ports(context)
             _config(context.config)
@@ -122,12 +118,37 @@ class AudioPlayStreamBlock(BlockDefinition):
             return BlockRuntimeResult(status="failed", outputs=[], last_message=str(exc), logs=[str(exc)])
         active = context.runtime_mode == "zeromq_active"
         if command is not None:
-            message = COMMAND_UNAVAILABLE if active else "Simulation : commande interrupt validée, aucune interruption ni lecture audio."
-            return BlockRuntimeResult(status="skipped", outputs=[], last_message=message,
+            if not active:
+                message = "Simulation : commande interrupt validée, aucune interruption ni lecture audio."
+                return BlockRuntimeResult(status="skipped", outputs=[], last_message=message,
+                    logs=[f"[audio-play-stream] {message}"], metadata={self.kind: {
+                        "state": "simulation", "command": {**command, "applied": False, "reason": "simulation"}}})
+            reset = context.services.get("reset_browser_audio")
+            if not callable(reset):
+                message = "La passerelle reset_browser_audio requise par Audio Play Stream est indisponible."
+                return BlockRuntimeResult(status="failed", outputs=[], last_message=message,
+                    error=message, exit_code=1, logs=[f"[audio-play-stream-error] {message}"],
+                    metadata={self.kind: {"state": "reset_unavailable",
+                        "command": {**command, "applied": False, "reason": "reset_browser_audio_unavailable"}}})
+            try:
+                reset_result = reset()
+                if not isinstance(reset_result, Mapping):
+                    raise RuntimeError("Réponse de reset_browser_audio invalide.")
+                scheduled = reset_result.get("scheduled_readers")
+                if isinstance(scheduled, bool) or not isinstance(scheduled, int) or scheduled < 0:
+                    raise RuntimeError("Nombre de lecteurs planifiés invalide.")
+            except (RuntimeError, TypeError, ValueError) as exc:
+                message = f"Interruption audio impossible : {exc}"
+                return BlockRuntimeResult(status="failed", outputs=[], last_message=message,
+                    error=message, exit_code=1, logs=[f"[audio-play-stream-error] {message}"],
+                    metadata={self.kind: {"state": "reset_failed",
+                        "command": {**command, "applied": False, "reason": "reset_browser_audio_failed"}}})
+            message = (f"Interruption audio transmise à {scheduled} lecteur"
+                       f"{'s' if scheduled != 1 else ''} navigateur.")
+            return BlockRuntimeResult(status="success", outputs=[], last_message=message,
                 logs=[f"[audio-play-stream] {message}"], metadata={self.kind: {
-                    "state": "command_unavailable" if active else "simulation",
-                    "command": {**command, "applied": False,
-                                "reason": "browser_command_bridge_unavailable" if active else "simulation"}}})
+                    "state": "reset_scheduled", "command": {**command, "applied": True,
+                        "scheduled_readers": scheduled}}})
         message = ("Lecteur prêt dans le navigateur : activez le son puis envoyez un flux."
                    if active else "Simulation : aucune lecture audio dans le navigateur.")
         return BlockRuntimeResult(
@@ -135,18 +156,6 @@ class AudioPlayStreamBlock(BlockDefinition):
             logs=[f"[audio-play-stream] {message}"],
             metadata={self.kind: {"state": "browser_owned" if active else "simulation"}},
         )
-
-    def ui_assets(self, surface: str = "modal") -> list[dict[str, str]]:
-        """Declare only block-local playback or UI assets, in dependency order."""
-        common = [{"kind": "js", "path": "assets/js/common.js"}]
-        if surface == "browser_runtime":
-            return common + [{"kind": "js", "path": f"assets/js/{name}.js"}
-                             for name in ("opus_demux", "browser_runtime")]
-        if surface in {"modal", "inspector_panel", "node_card"}:
-            script = "block_modal" if surface == "modal" else surface
-            return [{"kind": "css", "path": "assets/css/block_ui.css"}, *common,
-                    {"kind": "js", "path": f"assets/js/{script}.js"}]
-        return []
 
     def render_node_card(self, *, node: dict, payload: dict | None = None) -> dict:
         """Render a local state indicator without creating a second audio receiver."""
@@ -170,17 +179,17 @@ class AudioPlayStreamBlock(BlockDefinition):
                 f'<div class="audio-play-fields">{fields["latency_ms"]}{fields["max_buffer_sec"]}</div></div></details>')
 
     def _command_notice_html(self, node: dict) -> str:
-        """Explain the missing command bridge separately from local mute and durable settings."""
+        """Explain browser interruption separately from local mute and durable settings."""
         available = any(port.get("id") == 2 and port.get("name") == "command_in" for port in node.get("inputs", []))
-        detail = ('<code>command_in</code> reconnaît <code>{"action":"interrupt"}</code>, mais ne coupe pas le son : '
-                  'la passerelle de commandes vers le navigateur est absente. Le son et la file restent inchangés.'
+        detail = ('<code>command_in</code> reconnaît <code>{"action":"interrupt"}</code>. En Runtime actif, '
+                  'la commande arrête immédiatement les sons programmés et vide les buffers de ce lecteur dans chaque navigateur connecté.'
                   if available else 'Ce bloc possède uniquement audio_in. Recréez-le pour ajouter command_in. '
-                  'La coupure par commande reste indisponible tant que la passerelle vers le navigateur est absente.')
+                  'Les blocs existants à une entrée continuent de lire normalement, sans commande d’interruption.')
         return ('<aside class="audio-play-command-note" data-player-command-notice role="note">'
-                '<strong>Interruption par commande indisponible</strong><p>' + detail + '</p></aside>')
+                '<strong>Interruption immédiate</strong><p>' + detail + '</p></aside>')
 
     def render_modal(self, *, node: dict, payload: dict | None = None) -> dict:
-        """Render an opaque panel with fixed actions, diagnostics and an explicit command-bridge limitation."""
+        """Render an opaque panel with fixed actions, diagnostics and interruption guidance."""
         template = (self.directory / "block_modal.html").read_text(encoding="utf-8")
         template = template.replace("{{ settings_html }}", self._settings_html(node))
         template = template.replace("{{ command_notice_html }}", self._command_notice_html(node))
@@ -194,7 +203,7 @@ class AudioPlayStreamBlock(BlockDefinition):
                 "context": {"node_id": str(node.get("id") or ""), "node_kind": self.kind}}
 
     def render_inspector_panel(self, *, node: dict, payload: dict | None = None) -> dict:
-        """Expose local controls, durable settings and the unavailable command bridge in the inspector."""
+        """Expose local controls, durable settings and browser interruption in the inspector."""
         template = (self.directory / "inspector_panel.html").read_text(encoding="utf-8")
         html = render_inspector_template(template=template, node={**node, "type": self.kind, "kind": self.kind},
                                          payload=payload, replacements={"settings_html": self._settings_html(node),

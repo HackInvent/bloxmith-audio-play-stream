@@ -1,15 +1,14 @@
 /** Browser-owned decoding, bounded playback scheduling and run-scoped resource cleanup. */
-(function () {
-  "use strict";
-  const ui = window.CWAudioPlayStream;
-  const registry = (window.CWBlockUiBlocks = window.CWBlockUiBlocks || {});
+import * as ui from "./common.js";
+import { OpusDemux } from "./opus_demux.js";
+
   const requireValue = (ok, message) => { if (!ok) throw new Error(message); };
 
   /** Play one sequential audio input using the page-shared AudioContext.
    * @param {object} api - Browser runtime facade with node, audioContext and abort signal.
    * @returns {object} An awaited frame consumer, local controls and an idempotent disposer.
    */
-  ui.createPlayer = function createPlayer(api) {
+  export function create(api) {
     const context = api.audioContext;
     const raw = api.node.config || {};
     const config = { volume: Number(raw.volume ?? 80), muted: raw.muted ?? false,
@@ -39,19 +38,19 @@
     let frameDeadline = 0;
 
     /** Enforce run cancellation, browser suspension and the transport ACK deadline. */
-    function alive() {
-      requireValue(!disposed && !api.signal.aborted, "Lecture arrêtée.");
+    function alive(signal = api.signal) {
+      requireValue(!disposed && !api.signal.aborted && !signal?.aborted, "Lecture arrêtée.");
       requireValue(context.state === "running", "Son suspendu dans le navigateur. Réactivez le son.");
       requireValue(!frameDeadline || Date.now() < frameDeadline, "Lecteur saturé : impossible de suivre le flux audio.");
       if (decoderError) throw decoderError;
     }
     const notify = () => ui.notify();
     /** Schedule short PCM buffers; await capacity before ACK instead of growing an unbounded queue. */
-    async function schedule(buffer) {
-      alive();
+    async function schedule(buffer, signal) {
+      alive(signal);
       while (Math.max(0, nextTime - context.currentTime) + buffer.duration > config.maxBuffer) {
         await new Promise(resolve => setTimeout(resolve, 15));
-        alive();
+        alive(signal);
       }
       requireValue(sources.size < 1024, "Trop de fragments audio en attente.");
       const source = context.createBufferSource();
@@ -71,7 +70,7 @@
     }
 
     /** Decode interleaved signed little-endian PCM, carrying incomplete samples across frames. */
-    async function pcm(bytes, profile) {
+    async function pcm(bytes, profile, signal) {
       const data = new Uint8Array(pcmTail.length + bytes.length);
       data.set(pcmTail); data.set(bytes, pcmTail.length);
       const stride = profile.channels * 2;
@@ -79,7 +78,7 @@
       const view = new DataView(data.buffer);
       pcmTail = data.slice(count * stride);
       for (let offset = 0; offset < count; offset += 4096) {
-        alive();
+        alive(signal);
         const length = Math.min(4096, count - offset);
         const buffer = context.createBuffer(profile.channels, length, profile.sample_rate_hz);
         for (let channel = 0; channel < profile.channels; channel++) {
@@ -88,7 +87,7 @@
             target[sample] = view.getInt16((offset + sample) * stride + channel * 2, true) / 32768;
           }
         }
-        await schedule(buffer);
+        await schedule(buffer, signal);
       }
     }
 
@@ -114,8 +113,8 @@
      * Only one packet is outstanding. Its output callback, not flush(), signals completion:
      * flushing between packets reinitializes Chromium's decoder and corrupts predictive audio.
      */
-    async function opus(packet) {
-      alive();
+    async function opus(packet, signal) {
+      alive(signal);
       requireValue(!pendingDecode && decoded.length === 0, "Décodage audio concurrent non pris en charge.");
       let pending;
       let timer;
@@ -131,7 +130,7 @@
         clearTimeout(timer);
         if (pendingDecode === pending) pendingDecode = null;
       }
-      alive();
+      alive(signal);
       const frames = decoded;
       decoded = [];
       let offset = 0;
@@ -148,7 +147,7 @@
               frame.copyTo(plane, { planeIndex: channel, format: "f32-planar", frameOffset: begin, frameCount: end - begin });
               if (packet.gain !== 1) for (let i = 0; i < plane.length; i++) plane[i] = Math.max(-1, Math.min(1, plane[i] * packet.gain));
             }
-            await schedule(buffer);
+            await schedule(buffer, signal);
           }
           offset += frame.numberOfFrames;
         }
@@ -157,7 +156,7 @@
     }
 
     /** Start a fresh decoder on each stream_id; late or interleaved recordings are rejected. */
-    async function begin(frame) {
+    async function begin(frame, signal) {
       if (stream) {
         requireValue(!retired.has(frame.stream_id), "Flux audio entrelacés non pris en charge.");
         requireValue(pcmTail.length === 0, "Dernier échantillon PCM tronqué.");
@@ -174,7 +173,7 @@
           "Ce navigateur ne propose pas le décodage Opus WebCodecs. Utilisez une source PCM ou un navigateur compatible.");
         const options = { codec: "opus", sampleRate: 48000, numberOfChannels: frame.channels };
         const support = await window.AudioDecoder.isConfigSupported(options);
-        alive();
+        alive(signal);
         requireValue(support.supported, "Décodage Opus non pris en charge dans ce navigateur.");
         const ownedDecoder = new window.AudioDecoder({
           /** Complete the current packet only after all its bounded PCM output has arrived. */
@@ -201,14 +200,14 @@
         decoder = ownedDecoder;
         // Raw packets: container pre-skip, gain and end trimming are applied by this block.
         decoder.configure(options);
-        demux = new ui.OpusDemux(frame.channels, opus);
+        demux = new OpusDemux(frame.channels, packet => opus(packet, signal));
       }
     }
 
     /** Validate transport metadata and consume exactly one ordered frame before its ACK. */
-    async function enqueue(frame) {
+    async function enqueue(frame, signal = api.signal) {
       frameDeadline = Date.now() + 12000;
-      alive();
+      alive(signal);
       requireValue(frame.payload instanceof ArrayBuffer && frame.payload.byteLength > 0
         && frame.payload.byteLength <= 524288, "Trame audio vide ou trop volumineuse.");
       requireValue(["pcm_s16le", "opus"].includes(frame.codec), "Format audio non pris en charge : PCM16 ou Opus WebM/Ogg attendu.");
@@ -216,15 +215,43 @@
         && frame.sample_rate_hz >= 8000 && frame.sample_rate_hz <= 192000
         && typeof frame.stream_id === "string" && frame.stream_id.length > 0
         && Number.isSafeInteger(frame.sequence) && frame.sequence >= 0, "Profil de trame audio invalide.");
-      if (!stream || stream.stream_id !== frame.stream_id) await begin(frame);
+      if (!stream || stream.stream_id !== frame.stream_id) await begin(frame, signal);
       requireValue(frame.sequence === stream.sequence + 1 && frame.source_id === stream.source_id
         && frame.codec === stream.codec && frame.channels === stream.channels && frame.sample_rate_hz === stream.sample_rate_hz,
       "Trame audio manquante ou profil modifié en cours de flux. Relancez la lecture.");
       stream.sequence = frame.sequence;
-      if (frame.codec === "pcm_s16le") await pcm(new Uint8Array(frame.payload), stream);
+      if (frame.codec === "pcm_s16le") await pcm(new Uint8Array(frame.payload), stream, signal);
       else await demux.push(new Uint8Array(frame.payload));
+      alive(signal);
       receivedFrames++;
       frameDeadline = 0;
+      notify();
+    }
+
+    /** Stop every source already scheduled by this player without closing the shared AudioContext. */
+    function stopSources() {
+      for (const source of sources) {
+        source.onended = null;
+        try { source.stop(); } catch (_) { /* A source may already have ended. */ }
+        source.disconnect();
+      }
+      sources.clear();
+    }
+
+    /** Purge scheduled sound, decoder work and stream state while keeping the receiver alive. */
+    function reset() {
+      if (disposed) return;
+      stopSources();
+      closeDecoder();
+      stream = null;
+      demux = null;
+      pcmTail = new Uint8Array();
+      retired.clear();
+      decoderError = null;
+      frameDeadline = 0;
+      nextTime = 0;
+      message = "Lecture interrompue · à l’écoute de audio_in.";
+      error = false;
       notify();
     }
 
@@ -234,12 +261,9 @@
       disposed = true;
       message = reason; error = failed;
       api.signal.removeEventListener("abort", abort);
-      for (const source of sources) {
-        source.onended = null;
-        try { source.stop(); } catch (_) { /* A source may already have ended. */ }
-        source.disconnect();
-      }
-      sources.clear(); closeDecoder(); gain.disconnect();
+      stopSources();
+      closeDecoder();
+      gain.disconnect();
       demux = null; pcmTail = new Uint8Array(); retired.clear();
       notify();
     }
@@ -248,7 +272,7 @@
     if (api.signal.aborted) dispose();
     const snapshot = () => ({ message, error, volume: config.volume, muted: config.muted,
       active: !disposed, receivedFrames, playedSamples, highWaterSeconds });
-    return { enqueue, dispose, snapshot,
+    return { enqueue, reset, dispose, snapshot,
       /** Adjust only this browser's gain; mute continues draining the stream. */
       setVolume(value) {
         if (disposed || !Number.isFinite(value) || value < 0 || value > 100) return;
@@ -265,13 +289,12 @@
         notify();
       },
     };
-  };
+  }
 
-  registry.audio_play_streamBrowserRuntime = {
-    /** Attach once per Run/browser/node; all UI surfaces control this same receiver. */
-    async start(api) {
+  /** Attach once per Run/browser/node; all UI surfaces control this same receiver. */
+  export async function start(api) {
       const key = ui.key(api.runtimeAudioStreams.getContext());
-      const player = ui.createPlayer(api);
+      const player = create(api);
       let receiver = null;
       let stopped = false;
       /** Release only this subscription; retain a lightweight diagnostic for local surfaces. */
@@ -289,9 +312,16 @@
       try {
         requireValue(!api.signal.aborted, "Lecture arrêtée.");
         receiver = await api.runtimeAudioStreams.openInput({ inputPort: "audio_in",
-          async onFrame(frame) {
-            try { await player.enqueue(frame); }
-            catch (failure) { stop(failure.message || "Lecture interrompue.", !api.signal.aborted); throw failure; }
+          async onFrame(frame, { signal } = {}) {
+            try { await player.enqueue(frame, signal); }
+            catch (failure) {
+              if (signal?.aborted) return;
+              stop(failure.message || "Lecture interrompue.", !api.signal.aborted);
+              throw failure;
+            }
+          },
+          onReset(_event, { signal } = {}) {
+            if (!signal?.aborted) player.reset();
           },
           onState(event) { if (event.type === "runtime_audio_stream.closed") stop("Connexion audio fermée. Relancez Run pour réessayer."); },
           onError(failure) { stop(failure.message || "Connexion audio interrompue.", true); },
@@ -302,6 +332,4 @@
         stop(failure.message || "Impossible d’ouvrir le lecteur.", !api.signal.aborted);
         throw failure;
       }
-    },
-  };
-})();
+  }
