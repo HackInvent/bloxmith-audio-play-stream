@@ -15,7 +15,7 @@ import { OpusDemux } from "./opus_demux.js";
       latency: Number(raw.latency_ms ?? 100) / 1000, maxBuffer: Number(raw.max_buffer_sec ?? 5) };
     requireValue(Number.isFinite(config.volume) && config.volume >= 0 && config.volume <= 100
       && typeof config.muted === "boolean" && config.latency >= 0.02 && config.latency <= 1
-      && config.maxBuffer >= 1 && config.maxBuffer <= 10, "Réglages de lecture invalides.");
+      && config.maxBuffer >= 1 && config.maxBuffer <= 10, "Invalid playback settings.");
     const gain = context.createGain();
     gain.gain.value = config.muted ? 0 : config.volume / 100;
     gain.connect(context.destination);
@@ -33,15 +33,15 @@ import { OpusDemux } from "./opus_demux.js";
     let receivedFrames = 0;
     let playedSamples = 0;
     let highWaterSeconds = 0;
-    let message = "À l’écoute de audio_in.";
+    let message = "Listening on audio_in.";
     let error = false;
     let frameDeadline = 0;
 
     /** Enforce run cancellation, browser suspension and the transport ACK deadline. */
     function alive(signal = api.signal) {
-      requireValue(!disposed && !api.signal.aborted && !signal?.aborted, "Lecture arrêtée.");
-      requireValue(context.state === "running", "Son suspendu dans le navigateur. Réactivez le son.");
-      requireValue(!frameDeadline || Date.now() < frameDeadline, "Lecteur saturé : impossible de suivre le flux audio.");
+      requireValue(!disposed && !api.signal.aborted && !signal?.aborted, "Playback stopped.");
+      requireValue(context.state === "running", "Sound suspended in the browser. Enable the sound again.");
+      requireValue(!frameDeadline || Date.now() < frameDeadline, "Player saturated: it cannot keep up with the audio stream.");
       if (decoderError) throw decoderError;
     }
     const notify = () => ui.notify();
@@ -52,21 +52,21 @@ import { OpusDemux } from "./opus_demux.js";
         await new Promise(resolve => setTimeout(resolve, 15));
         alive(signal);
       }
-      requireValue(sources.size < 1024, "Trop de fragments audio en attente.");
+      requireValue(sources.size < 1024, "Too many pending audio fragments.");
       const source = context.createBufferSource();
       source.buffer = buffer;
       source.connect(gain);
       sources.add(source);
       source.onended = () => {
         source.disconnect(); sources.delete(source);
-        if (!disposed && !sources.size) { message = "À l’écoute de audio_in."; notify(); }
+        if (!disposed && !sources.size) { message = "Listening on audio_in."; notify(); }
       };
       const start = Math.max(nextTime, context.currentTime + Math.min(config.latency, config.maxBuffer - buffer.duration));
       nextTime = start + buffer.duration;
       source.start(start);
       playedSamples += buffer.length;
       highWaterSeconds = Math.max(highWaterSeconds, nextTime - context.currentTime);
-      message = config.muted ? "Flux reçu · silence local." : "Lecture en cours.";
+      message = config.muted ? "Stream received · local mute." : "Playing.";
     }
 
     /** Decode interleaved signed little-endian PCM, carrying incomplete samples across frames. */
@@ -95,7 +95,7 @@ import { OpusDemux } from "./opus_demux.js";
     function closeDecoder() {
       const previous = decoder;
       decoder = null;
-      pendingDecode?.reject(new Error("Lecture arrêtée."));
+      pendingDecode?.reject(new Error("Playback stopped."));
       pendingDecode = null;
       if (previous && previous.state !== "closed") previous.close();
       for (const frame of decoded) frame.close();
@@ -115,14 +115,14 @@ import { OpusDemux } from "./opus_demux.js";
      */
     async function opus(packet, signal) {
       alive(signal);
-      requireValue(!pendingDecode && decoded.length === 0, "Décodage audio concurrent non pris en charge.");
+      requireValue(!pendingDecode && decoded.length === 0, "Concurrent audio decoding is not supported.");
       let pending;
       let timer;
       try {
         await new Promise((resolve, reject) => {
           pending = { resolve, reject, expected: packet.samples, received: 0, timestamp: packet.timestamp };
           pendingDecode = pending;
-          timer = setTimeout(() => reject(new Error("Le décodeur Opus ne répond plus.")), 2500);
+          timer = setTimeout(() => reject(new Error("The Opus decoder stopped responding.")), 2500);
           decoder.decode(new window.EncodedAudioChunk({ type: "key", timestamp: packet.timestamp,
             duration: packet.samples * 1000000 / 48000, data: packet.data }));
         });
@@ -137,7 +137,7 @@ import { OpusDemux } from "./opus_demux.js";
       try {
         for (const frame of frames) {
           requireValue(frame.sampleRate === 48000 && frame.numberOfChannels === stream.channels,
-            "Profil PCM décodé incompatible.");
+            "Incompatible decoded PCM profile.");
           const begin = Math.max(0, packet.trimStart - offset);
           const end = Math.min(frame.numberOfFrames, packet.samples - packet.trimEnd - offset);
           if (end > begin) {
@@ -151,15 +151,15 @@ import { OpusDemux } from "./opus_demux.js";
           }
           offset += frame.numberOfFrames;
         }
-        requireValue(offset === packet.samples, "Le décodeur Opus a renvoyé une durée inattendue.");
+        requireValue(offset === packet.samples, "The Opus decoder returned an unexpected duration.");
       } finally { for (const frame of frames) frame.close(); }
     }
 
     /** Start a fresh decoder on each stream_id; late or interleaved recordings are rejected. */
     async function begin(frame, signal) {
       if (stream) {
-        requireValue(!retired.has(frame.stream_id), "Flux audio entrelacés non pris en charge.");
-        requireValue(pcmTail.length === 0, "Dernier échantillon PCM tronqué.");
+        requireValue(!retired.has(frame.stream_id), "Interleaved audio streams are not supported.");
+        requireValue(pcmTail.length === 0, "Truncated last PCM sample.");
         demux?.finish();
         retired.add(stream.stream_id);
         if (retired.size > 128) retired.delete(retired.values().next().value);
@@ -170,31 +170,31 @@ import { OpusDemux } from "./opus_demux.js";
       demux = null; pcmTail = new Uint8Array(); decoderError = null;
       if (frame.codec === "opus") {
         requireValue(window.AudioDecoder && window.EncodedAudioChunk,
-          "Ce navigateur ne propose pas le décodage Opus WebCodecs. Utilisez une source PCM ou un navigateur compatible.");
+          "This browser does not provide Opus WebCodecs decoding. Use a PCM source or a compatible browser.");
         const options = { codec: "opus", sampleRate: 48000, numberOfChannels: frame.channels };
         const support = await window.AudioDecoder.isConfigSupported(options);
         alive(signal);
-        requireValue(support.supported, "Décodage Opus non pris en charge dans ce navigateur.");
+        requireValue(support.supported, "Opus decoding is not supported in this browser.");
         const ownedDecoder = new window.AudioDecoder({
           /** Complete the current packet only after all its bounded PCM output has arrived. */
           output(data) {
             if (disposed || decoder !== ownedDecoder) { data.close(); return; }
             const pending = pendingDecode;
             if (!pending || decoded.length >= 8) {
-              data.close(); failDecode(new Error("Sortie du décodeur inattendue ou file audio saturée.")); return;
+              data.close(); failDecode(new Error("Unexpected decoder output, or saturated audio queue.")); return;
             }
             const expectedTimestamp = pending.timestamp + Math.round(pending.received * 1000000 / 48000);
             if (data.sampleRate !== 48000 || data.numberOfChannels !== stream.channels
                 || data.numberOfFrames <= 0 || pending.received + data.numberOfFrames > pending.expected
                 || Math.abs(data.timestamp - expectedTimestamp) > 1) {
-              data.close(); failDecode(new Error("Profil, durée ou horodatage PCM décodé incompatible.")); return;
+              data.close(); failDecode(new Error("Incompatible decoded PCM profile, duration or timestamp.")); return;
             }
             decoded.push(data);
             pending.received += data.numberOfFrames;
             if (pending.received === pending.expected) pending.resolve();
           },
           error(failure) {
-            if (!disposed && decoder === ownedDecoder) failDecode(new Error(`Décodage Opus interrompu : ${failure.message}`));
+            if (!disposed && decoder === ownedDecoder) failDecode(new Error(`Opus decoding interrupted: ${failure.message}`));
           },
         });
         decoder = ownedDecoder;
@@ -209,16 +209,16 @@ import { OpusDemux } from "./opus_demux.js";
       frameDeadline = Date.now() + 12000;
       alive(signal);
       requireValue(frame.payload instanceof ArrayBuffer && frame.payload.byteLength > 0
-        && frame.payload.byteLength <= 524288, "Trame audio vide ou trop volumineuse.");
-      requireValue(["pcm_s16le", "opus"].includes(frame.codec), "Format audio non pris en charge : PCM16 ou Opus WebM/Ogg attendu.");
+        && frame.payload.byteLength <= 524288, "Empty or oversized audio frame.");
+      requireValue(["pcm_s16le", "opus"].includes(frame.codec), "Unsupported audio format: PCM16 or Opus WebM/Ogg expected.");
       requireValue([1, 2].includes(frame.channels) && Number.isInteger(frame.sample_rate_hz)
         && frame.sample_rate_hz >= 8000 && frame.sample_rate_hz <= 192000
         && typeof frame.stream_id === "string" && frame.stream_id.length > 0
-        && Number.isSafeInteger(frame.sequence) && frame.sequence >= 0, "Profil de trame audio invalide.");
+        && Number.isSafeInteger(frame.sequence) && frame.sequence >= 0, "Invalid audio frame profile.");
       if (!stream || stream.stream_id !== frame.stream_id) await begin(frame, signal);
       requireValue(frame.sequence === stream.sequence + 1 && frame.source_id === stream.source_id
         && frame.codec === stream.codec && frame.channels === stream.channels && frame.sample_rate_hz === stream.sample_rate_hz,
-      "Trame audio manquante ou profil modifié en cours de flux. Relancez la lecture.");
+      "Missing audio frame, or profile changed mid-stream. Restart the playback.");
       stream.sequence = frame.sequence;
       if (frame.codec === "pcm_s16le") await pcm(new Uint8Array(frame.payload), stream, signal);
       else await demux.push(new Uint8Array(frame.payload));
@@ -250,13 +250,13 @@ import { OpusDemux } from "./opus_demux.js";
       decoderError = null;
       frameDeadline = 0;
       nextTime = 0;
-      message = "Lecture interrompue · à l’écoute de audio_in.";
+      message = "Playback interrupted · listening on audio_in.";
       error = false;
       notify();
     }
 
     /** Stop only this block's sources/decoder/gain; the page-shared AudioContext stays open. */
-    function dispose(reason = "Lecture arrêtée.", failed = false) {
+    function dispose(reason = "Playback stopped.", failed = false) {
       if (disposed) return;
       disposed = true;
       message = reason; error = failed;
@@ -285,7 +285,7 @@ import { OpusDemux } from "./opus_demux.js";
         if (disposed) return;
         config.muted = Boolean(value);
         gain.gain.setTargetAtTime(config.muted ? 0 : config.volume / 100, context.currentTime, 0.01);
-        if (sources.size) message = config.muted ? "Flux reçu · silence local." : "Lecture en cours.";
+        if (sources.size) message = config.muted ? "Stream received · local mute." : "Playing.";
         notify();
       },
     };
@@ -298,7 +298,7 @@ import { OpusDemux } from "./opus_demux.js";
       let receiver = null;
       let stopped = false;
       /** Release only this subscription; retain a lightweight diagnostic for local surfaces. */
-      const stop = (message = "Lecture arrêtée.", failed = false) => {
+      const stop = (message = "Playback stopped.", failed = false) => {
         if (stopped) return;
         stopped = true;
         api.signal.removeEventListener("abort", abort);
@@ -310,26 +310,26 @@ import { OpusDemux } from "./opus_demux.js";
       api.signal.addEventListener("abort", abort, { once: true });
       ui.set(key, { player });
       try {
-        requireValue(!api.signal.aborted, "Lecture arrêtée.");
+        requireValue(!api.signal.aborted, "Playback stopped.");
         receiver = await api.runtimeAudioStreams.openInput({ inputPort: "audio_in",
           async onFrame(frame, { signal } = {}) {
             try { await player.enqueue(frame, signal); }
             catch (failure) {
               if (signal?.aborted) return;
-              stop(failure.message || "Lecture interrompue.", !api.signal.aborted);
+              stop(failure.message || "Playback interrupted.", !api.signal.aborted);
               throw failure;
             }
           },
           onReset(_event, { signal } = {}) {
             if (!signal?.aborted) player.reset();
           },
-          onState(event) { if (event.type === "runtime_audio_stream.closed") stop("Connexion audio fermée. Relancez Run pour réessayer."); },
-          onError(failure) { stop(failure.message || "Connexion audio interrompue.", true); },
+          onState(event) { if (event.type === "runtime_audio_stream.closed") stop("Audio connection closed. Run again to retry."); },
+          onError(failure) { stop(failure.message || "Audio connection interrupted.", true); },
         });
         if (stopped || api.signal.aborted) { receiver.close(); stop(); }
         return () => stop();
       } catch (failure) {
-        stop(failure.message || "Impossible d’ouvrir le lecteur.", !api.signal.aborted);
+        stop(failure.message || "Unable to open the player.", !api.signal.aborted);
         throw failure;
       }
   }

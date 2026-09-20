@@ -91,7 +91,7 @@ async ({ fixtures, references, modal, modules }) => {
   const beforeResetFrames = interrupted.state().receivedFrames;
   interrupted.reset();
   assert(interrupted.state().active && interrupted.closes === 0, "reset must retain the player subscription");
-  assert(/interrompue/.test(interrupted.state().message), "reset must expose an honest local state");
+  assert(/interrupted/.test(interrupted.state().message), "reset must expose an honest local state");
   assert(observed.slice(interruptedBegin).every(info => info.stopped && info.disconnected),
     "reset must stop and disconnect every scheduled source");
   await interrupted.send(frame(new Uint8Array(480), { sequence: 1 }));
@@ -189,12 +189,12 @@ async ({ fixtures, references, modal, modules }) => {
     frame(new Uint8Array(10), { codec: "opus", sample_rate_hz: 48000 }),
     frame(new Uint8Array(524289)), frame(new Uint8Array(1), { channels: 3 })]) {
     const stream = await open();
-    await rejects(() => stream.send(invalid), /Format|En-tête|volumineuse|Profil/);
+    await rejects(() => stream.send(invalid), /format|header|oversized|profile/i);
     assert(stream.state().error && stream.closes === 1 && !stream.state().active, "error must close only failed reader");
   }
   const gap = await open();
   await gap.send(frame(new Uint8Array(10)));
-  await rejects(() => gap.send(frame(new Uint8Array(10), { sequence: 2 })), /manquante/);
+  await rejects(() => gap.send(frame(new Uint8Array(10), { sequence: 2 })), /Missing audio frame/);
   const unavailable = await open();
   const savedDecoder = window.AudioDecoder;
   window.AudioDecoder = undefined;
@@ -252,14 +252,14 @@ async ({ fixtures, references, modal, modules }) => {
     resetting.stop();
 
     const failed = await open();
-    const decodeError = rejects(() => failed.send(opusFrame()), /Décodage Opus interrompu/);
+    const decodeError = rejects(() => failed.send(opusFrame()), /Opus decoding interrupted/);
     await delay(0);
     DeferredDecoder.last.callbacks.error(new Error("test decoder failure"));
     await decodeError;
     assert(failed.state().error && failed.closes === 1, "Decoder errors must reject and close the input reader");
 
     const oversized = await open();
-    const invalidOutput = rejects(() => oversized.send(opusFrame()), /PCM décodé incompatible/);
+    const invalidOutput = rejects(() => oversized.send(opusFrame()), /Incompatible decoded PCM/);
     await delay(0);
     let invalidClosed = false;
     DeferredDecoder.last.callbacks.output({ sampleRate: 48000, numberOfChannels: 1, numberOfFrames: 961,
@@ -268,7 +268,7 @@ async ({ fixtures, references, modal, modules }) => {
     assert(invalidClosed && oversized.state().error, "Unexpected output size must fail without leaking AudioData");
 
     const timeout = await open();
-    await rejects(() => timeout.send(opusFrame()), /ne répond plus/);
+    await rejects(() => timeout.send(opusFrame()), /stopped responding/);
     assert(timeout.state().error && timeout.closes === 1 && DeferredDecoder.last.state === "closed",
       "A missing decoder callback must time out and release the input reader");
   } finally { window.AudioDecoder = savedDecoder; }

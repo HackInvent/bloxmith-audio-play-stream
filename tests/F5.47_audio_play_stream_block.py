@@ -93,15 +93,15 @@ def test_contract_settings_and_assets():
         html = render(node={**current, "title": '<script>alert("x")</script>'})["html"]
         assert "<script>" not in html and "data-player-status" in html and "{{" not in html, html
     assert (BLOCK.directory / "README.md").is_file()
-    modal = BLOCK.render_modal(node=current, payload={"runtime": {"error": "Échec de lecture test"}})["html"]
-    assert 'audio-play-diagnostics" open' in modal and "Échec de lecture test" in modal
+    modal = BLOCK.render_modal(node=current, payload={"runtime": {"error": "Test playback failure"}})["html"]
+    assert 'audio-play-diagnostics" open' in modal and "Test playback failure" in modal
     assert modal.count("data-block-modal-error-panel") == 1
     assert 'value="80"' in modal and 'value="80.0"' not in modal
     assert BLOCK.model["runtime"]["active_execution_policy"] == "on_each_event"
     assert len(BLOCK.default_inputs()) == 2
     for render in (BLOCK.render_modal, BLOCK.render_inspector_panel):
-        assert "Interruption immédiate" in render(node=current)["html"]
-        assert "Recréez-le" in render(node={**current, "inputs": current["inputs"][:1]})["html"]
+        assert "Immediate interruption" in render(node=current)["html"]
+        assert "Recreate it" in render(node={**current, "inputs": current["inputs"][:1]})["html"]
 
 
 def test_port_order():
@@ -201,7 +201,7 @@ def test_explicit_commands():
 def test_command_graph_modes():
     """FB2/FB6: real command routing respects reversed Player ports without audio or playback claims."""
     source = node(get_block_definition("text"), "source")
-    source["outputs"][0]["text"] = "Déclencher"
+    source["outputs"][0]["text"] = "Trigger"
     control = node(get_block_definition("python"), "control")
     control["config"]["script"] = 'def run(inputs, outputs, params):\n    outputs["out"] = {"action": "interrupt"}\n'
     control["outputs"][0]["emits"] = ["application/json"]
@@ -426,7 +426,7 @@ def test_modal_layout(page):
         assert not modal.locator(".audio-play-advanced").evaluate("element => element.open")
         notice = modal.locator("[data-player-command-notice]")
         notice.scroll_into_view_if_needed()
-        assert notice.is_visible() and "arrête immédiatement" in notice.inner_text()
+        assert notice.is_visible() and "immediately stops" in notice.inner_text()
         assert not notice.evaluate("element => element.scrollWidth > element.clientWidth + 1")
         page.screenshot(path=artifact_path(f"audio-play-modal-{label}.png"))
     advanced = modal.locator(".audio-play-advanced summary")
@@ -439,7 +439,7 @@ def test_modal_layout(page):
     advanced.click()
     modal.locator('[data-player-apply]').click()
     assert modal.locator(".audio-play-advanced").evaluate("element => element.open")
-    assert "Vérifiez" in modal.locator('[data-player-feedback]').inner_text()
+    assert "Check" in modal.locator('[data-player-feedback]').inner_text()
     latency.fill("100")
     modal.locator('[data-close-block-modal]').click()
     page.set_viewport_size({"width": 1440, "height": 900})
@@ -451,7 +451,7 @@ def test_modal_layout(page):
     inspector.wait_for(state="visible")
     notice = inspector.locator('[data-player-command-notice]')
     notice.scroll_into_view_if_needed()
-    assert notice.is_visible() and "arrête immédiatement" in notice.inner_text()
+    assert notice.is_visible() and "immediately stops" in notice.inner_text()
     assert not notice.evaluate("element => element.scrollWidth > element.clientWidth + 1")
     assert notice.evaluate("element => element.getBoundingClientRect().right <= innerWidth")
     page.screenshot(path=artifact_path("audio-play-inspector-command.png"))

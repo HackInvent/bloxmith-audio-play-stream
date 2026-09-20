@@ -6,7 +6,7 @@
   const check = (condition, message) => { if (!condition) throw new Error(message); };
   /** Copy only the unfinished bounded tail plus the next network chunk. */
   function join(left, right) {
-    check(left.length + right.length <= LIMIT, "En-tête ou paquet audio trop volumineux (1 Mio maximum).");
+    check(left.length + right.length <= LIMIT, "Audio header or packet too large (1 MiB maximum).");
     const data = new Uint8Array(left.length + right.length);
     data.set(left); data.set(right, left.length);
     return data;
@@ -17,7 +17,7 @@
     const first = data[offset];
     let width = 1;
     while (width <= 8 && !(first & (128 >> (width - 1)))) width++;
-    check(width <= (id ? 4 : 8), "Entier WebM invalide.");
+    check(width <= (id ? 4 : 8), "Invalid WebM integer.");
     if (offset + width > data.length) return null;
     let value = id ? first : first & ((128 >> (width - 1)) - 1);
     let unknown = !id && value === ((128 >> (width - 1)) - 1);
@@ -25,26 +25,26 @@
       value = value * 256 + data[offset + i];
       unknown = unknown && data[offset + i] === 255;
     }
-    check(unknown || Number.isSafeInteger(value), "Taille WebM hors limites.");
+    check(unknown || Number.isSafeInteger(value), "WebM size out of bounds.");
     return { width, value, unknown };
   }
   /** Read a bounded unsigned EBML payload without 32-bit truncation. */
   function uint(bytes) {
-    check(bytes.length <= 8, "Entier WebM trop long.");
+    check(bytes.length <= 8, "WebM integer too long.");
     let value = 0;
     for (const byte of bytes) value = value * 256 + byte;
-    check(Number.isSafeInteger(value), "Entier WebM hors limites.");
+    check(Number.isSafeInteger(value), "WebM integer out of bounds.");
     return value;
   }
   /** Return packet duration in samples at Opus's 48 kHz decode clock. */
   function samples(packet) {
-    check(packet.length > 0 && packet.length <= 65536, "Paquet Opus vide ou trop volumineux.");
+    check(packet.length > 0 && packet.length <= 65536, "Empty or oversized Opus packet.");
     const config = packet[0] >> 3;
     const ms = config < 12 ? [10, 20, 40, 60][config & 3]
       : config < 16 ? [10, 20][config & 1] : [2.5, 5, 10, 20][config & 3];
     const code = packet[0] & 3;
     const count = code === 0 ? 1 : code === 3 ? (packet[1] || 0) & 63 : 2;
-    check(count > 0 && ms * count <= 120, "Durée de paquet Opus invalide.");
+    check(count > 0 && ms * count <= 120, "Invalid Opus packet duration.");
     return Math.round(ms * count * 48);
   }
 
@@ -68,7 +68,7 @@
     readHeader(bytes) {
       check(!this.header && bytes.length === 19 && text(bytes.subarray(0, 8)) === "OpusHead"
         && bytes[8] < 16 && bytes[9] === this.channels && bytes[18] === 0,
-      "En-tête Opus mono/stéréo manquant ou incompatible ; relancez la source après activation du son.");
+      "Missing or incompatible mono/stereo Opus header; restart the source after enabling the sound.");
       this.header = bytes.slice();
       const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
       this.preSkip = view.getUint16(10, true);
@@ -77,7 +77,7 @@
 
     /** Produce ordered raw packets with sample-accurate start/end trimming metadata. */
     async emit(data, finalSample = null, discard = 0) {
-      check(this.header, "Début du flux Opus manquant ; relancez la source après activation du son.");
+      check(this.header, "Missing start of the Opus stream; restart the source after enabling the sound.");
       const count = samples(data);
       const start = this.totalSamples;
       this.totalSamples += count;
@@ -90,12 +90,12 @@
 
     /** Accept arbitrary network boundaries, retaining only incomplete container bytes. */
     async push(bytes) {
-      check(!this.ended || bytes.length === 0, "Données reçues après la fin du flux Ogg.");
+      check(!this.ended || bytes.length === 0, "Data received after the end of the Ogg stream.");
       this.buffer = join(this.buffer, bytes);
       if (!this.format && this.buffer.length >= 4) {
         if (text(this.buffer.subarray(0, 4)) === "OggS") this.format = "ogg";
         else if (this.buffer[0] === 0x1a && this.buffer[1] === 0x45 && this.buffer[2] === 0xdf && this.buffer[3] === 0xa3) this.format = "webm";
-        else throw new Error("En-tête Opus WebM/Ogg manquant. Activez le son avant de démarrer la source.");
+        else throw new Error("Missing Opus WebM/Ogg header. Enable the sound before starting the source.");
       }
       if (this.format === "ogg") await this.ogg();
       if (this.format === "webm") await this.webm();
@@ -105,7 +105,7 @@
     async ogg() {
       while (this.buffer.length >= 27) {
         const data = this.buffer;
-        check(!this.ended && text(data.subarray(0, 4)) === "OggS" && data[4] === 0, "Page Ogg invalide.");
+        check(!this.ended && text(data.subarray(0, 4)) === "OggS" && data[4] === 0, "Invalid Ogg page.");
         const count = data[26];
         if (data.length < 27 + count) return;
         const sizes = data.subarray(27, 27 + count);
@@ -116,12 +116,12 @@
         const first = this.oggSerial === null;
         check(first ? Boolean(data[5] & 2) && sequence === 0
           : serial === this.oggSerial && sequence === ((this.oggSequence + 1) >>> 0) && !(data[5] & 2),
-        "Début du flux Ogg manquant, page perdue ou flux entrelacés.");
-        check(Boolean(data[5] & 1) === Boolean(this.oggPartial.length), "Continuation Ogg incohérente.");
+        "Missing start of the Ogg stream, lost page, or interleaved streams.");
+        check(Boolean(data[5] & 1) === Boolean(this.oggPartial.length), "Inconsistent Ogg continuation.");
         this.oggSerial = serial; this.oggSequence = sequence;
         const end = Boolean(data[5] & 4);
         const granule = view.getBigUint64(6, true);
-        check(!end || granule <= BigInt(Number.MAX_SAFE_INTEGER), "Position finale Ogg invalide.");
+        check(!end || granule <= BigInt(Number.MAX_SAFE_INTEGER), "Invalid final Ogg position.");
         let offset = 27 + count;
         for (const length of sizes) {
           this.oggPartial = join(this.oggPartial, data.subarray(offset, offset + length));
@@ -131,11 +131,11 @@
           this.oggPartial = new Uint8Array();
           if (this.oggHeaders === 0) { this.readHeader(packet); this.oggHeaders++; }
           else if (this.oggHeaders === 1) {
-            check(packet.length >= 16 && text(packet.subarray(0, 8)) === "OpusTags", "En-tête OpusTags invalide.");
+            check(packet.length >= 16 && text(packet.subarray(0, 8)) === "OpusTags", "Invalid OpusTags header.");
             this.oggHeaders++;
           } else await this.emit(packet, end ? Number(granule) : null);
         }
-        check(!end || !this.oggPartial.length, "Dernier paquet Ogg tronqué.");
+        check(!end || !this.oggPartial.length, "Truncated last Ogg packet.");
         this.ended = end;
         this.buffer = data.slice(size);
       }
@@ -145,32 +145,32 @@
     async block(bytes, discard = 0) {
       const track = vint(bytes, 0);
       check(this.trackComplete && track && !track.unknown && track.value === this.trackNumber
-        && bytes.length >= track.width + 3, "Piste ou bloc WebM audio invalide.");
+        && bytes.length >= track.width + 3, "Invalid WebM audio track or block.");
       let offset = track.width + 3;
       const lace = (bytes[track.width + 2] & 6) >> 1;
       const sizes = [];
       if (!lace) sizes.push(bytes.length - offset);
       else {
-        check(offset < bytes.length, "Lacing WebM tronqué.");
+        check(offset < bytes.length, "Truncated WebM lacing.");
         const count = bytes[offset++] + 1;
-        check(count >= 2, "Lacing WebM invalide.");
+        check(count >= 2, "Invalid WebM lacing.");
         if (lace === 2) {
           const length = (bytes.length - offset) / count;
-          check(Number.isInteger(length), "Lacing WebM fixe invalide.");
+          check(Number.isInteger(length), "Invalid fixed WebM lacing.");
           sizes.push(...Array(count).fill(length));
         } else {
           for (let index = 0; index < count - 1; index++) {
             let length = 0;
             if (lace === 1) {
               let next;
-              do { check(offset < bytes.length, "Lacing Xiph tronqué."); next = bytes[offset++]; length += next; } while (next === 255);
+              do { check(offset < bytes.length, "Truncated Xiph lacing."); next = bytes[offset++]; length += next; } while (next === 255);
             } else {
               const value = vint(bytes, offset);
-              check(value && !value.unknown, "Lacing EBML tronqué.");
+              check(value && !value.unknown, "Truncated EBML lacing.");
               offset += value.width;
               length = value.value + (index ? sizes[index - 1] - (2 ** (7 * value.width - 1) - 1) : 0);
             }
-            check(length > 0 && length <= 65536, "Taille Opus WebM invalide.");
+            check(length > 0 && length <= 65536, "Invalid WebM Opus size.");
             sizes.push(length);
           }
           sizes.push(bytes.length - offset - sizes.reduce((sum, value) => sum + value, 0));
@@ -178,7 +178,7 @@
       }
       for (let index = 0; index < sizes.length; index++) {
         const length = sizes[index];
-        check(length > 0 && offset + length <= bytes.length, "Paquet WebM tronqué.");
+        check(length > 0 && offset + length <= bytes.length, "Truncated WebM packet.");
         await this.emit(bytes.subarray(offset, offset + length), null, index === sizes.length - 1 ? discard : 0);
         offset += length;
       }
@@ -188,14 +188,14 @@
     async closeMasters() {
       while (this.stack.length && this.position >= this.stack.at(-1).end) {
         const entry = this.stack.pop();
-        check(this.position === entry.end, "Élément WebM hors de son conteneur.");
+        check(this.position === entry.end, "WebM element outside its container.");
         if (entry.id === 0xae) {
           check(this.header && this.trackType === 2 && this.codecId === "A_OPUS" && this.trackNumber > 0,
-            "Seule une piste audio WebM Opus est prise en charge.");
+            "Only one WebM Opus audio track is supported.");
           this.trackComplete = true;
         }
         if (entry.id === 0xa0) {
-          check(this.group?.data, "Bloc WebM vide.");
+          check(this.group?.data, "Empty WebM block.");
           await this.block(this.group.data, this.group.discard);
           this.group = null;
         }
@@ -216,28 +216,28 @@
         if (levelOne.has(id.value) && this.stack.at(-1)?.id === 0x1f43b675 && this.stack.at(-1).end === Infinity) this.stack.pop();
         const headerSize = id.width + size.width;
         const end = size.unknown ? Infinity : this.position + headerSize + size.value;
-        check(size.unknown || end <= (this.stack.at(-1)?.end ?? Infinity), "Taille d'élément WebM incohérente.");
+        check(size.unknown || end <= (this.stack.at(-1)?.end ?? Infinity), "Inconsistent WebM element size.");
         if (masters.has(id.value)) {
-          check(!size.unknown || [0x18538067, 0x1f43b675].includes(id.value), "Conteneur WebM sans taille non pris en charge.");
-          check(this.stack.length < 12, "Imbrication WebM excessive.");
-          if (id.value === 0xae) { this.trackCount++; check(this.trackCount === 1, "WebM multipiste non pris en charge."); }
-          if (id.value === 0xa0) { check(!this.group, "BlockGroup imbriqué."); this.group = { data: null, discard: 0 }; }
+          check(!size.unknown || [0x18538067, 0x1f43b675].includes(id.value), "Unsized WebM container is not supported.");
+          check(this.stack.length < 12, "Excessive WebM nesting.");
+          if (id.value === 0xae) { this.trackCount++; check(this.trackCount === 1, "Multi-track WebM is not supported."); }
+          if (id.value === 0xa0) { check(!this.group, "Nested BlockGroup."); this.group = { data: null, discard: 0 }; }
           this.stack.push({ id: id.value, end });
           this.position += headerSize; this.buffer = this.buffer.slice(headerSize);
           continue;
         }
-        check(!size.unknown && size.value <= LIMIT - 12, "Métadonnées WebM trop volumineuses.");
+        check(!size.unknown && size.value <= LIMIT - 12, "WebM metadata too large.");
         if (this.buffer.length < headerSize + size.value) return;
         const bytes = this.buffer.subarray(headerSize, headerSize + size.value);
         if (id.value === 0xd7) this.trackNumber = uint(bytes);
         else if (id.value === 0x83) this.trackType = uint(bytes);
         else if (id.value === 0x86) this.codecId = text(bytes);
         else if (id.value === 0x63a2) this.readHeader(bytes);
-        else if (id.value === 0x9f) check(uint(bytes) === this.channels, "Canaux WebM incompatibles.");
+        else if (id.value === 0x9f) check(uint(bytes) === this.channels, "Incompatible WebM channels.");
         else if (id.value === 0xa3) await this.block(bytes);
-        else if (id.value === 0xa1) { check(this.group && !this.group.data, "Block WebM hors groupe."); this.group.data = bytes.slice(); }
+        else if (id.value === 0xa1) { check(this.group && !this.group.data, "WebM Block outside its group."); this.group.data = bytes.slice(); }
         else if (id.value === 0x75a2) {
-          check(this.group && bytes.length && !(bytes[0] & 128), "DiscardPadding WebM négatif non pris en charge.");
+          check(this.group && bytes.length && !(bytes[0] & 128), "Negative WebM DiscardPadding is not supported.");
           this.group.discard = Math.round(uint(bytes) * 48000 / 1000000000);
         }
         const consumed = headerSize + size.value;
@@ -249,6 +249,6 @@
     /** Refuse a truncated stream when a new stream_id supplies the next recording. */
     finish() {
       check(this.header && !this.buffer.length && !this.oggPartial.length && !this.group,
-        "Flux Opus précédent incomplet ; relancez la lecture.");
+        "Previous Opus stream incomplete; restart the playback.");
     }
   }

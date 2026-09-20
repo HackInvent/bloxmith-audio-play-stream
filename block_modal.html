@@ -1,26 +1,26 @@
 <div class="modal-panel block-config-modal audio-play-ui" role="dialog" aria-modal="true" aria-labelledby="{{ node_id }}PlayerTitle" data-generic-block-modal-root data-node-id="{{ node_id }}" data-node-kind="audio_play_stream">
   <header class="modal-header audio-play-header">
-    <div><span class="panel-kicker">Lecture audio · Ce navigateur</span><h2 id="{{ node_id }}PlayerTitle">{{ node_title }}</h2></div>
-    <button type="button" class="ghost-btn" data-close-block-modal>Fermer</button>
+    <div><span class="panel-kicker">Audio playback · This browser</span><h2 id="{{ node_id }}PlayerTitle">{{ node_title }}</h2></div>
+    <button type="button" class="ghost-btn" data-close-block-modal>Close</button>
   </header>
   <div class="audio-play-body">
-    <section class="audio-play-live" aria-label="Lecture en direct">
-      <div class="audio-play-section-heading"><h3>Lecture en direct</h3><span class="audio-play-badge">Contrôles locaux</span></div>
-      <p class="audio-play-status" data-player-status role="status" aria-live="polite">Lancez Run puis activez le son.</p>
+    <section class="audio-play-live" aria-label="Live playback">
+      <div class="audio-play-section-heading"><h3>Live playback</h3><span class="audio-play-badge">Local controls</span></div>
+      <p class="audio-play-status" data-player-status role="status" aria-live="polite">Run, then enable the sound.</p>
       <div class="audio-play-volume-row">
         <label class="audio-play-volume-label"><span>Volume <output data-player-volume-value>—</output></span><input type="range" min="0" max="100" value="80" data-player-volume disabled /></label>
-        <button type="button" class="ghost-btn" data-player-mute aria-pressed="false" disabled>Couper le son</button>
+        <button type="button" class="ghost-btn" data-player-mute aria-pressed="false" disabled>Mute</button>
       </div>
-      <p class="audio-play-help">Volume et silence ne concernent que ce navigateur. Fermer cette fenêtre ne coupe pas la lecture.</p>
+      <p class="audio-play-help">Volume and mute only affect this browser. Closing this window does not stop the playback.</p>
     </section>
     {{ command_notice_html }}
-    <section class="audio-play-settings" aria-label="Configuration du bloc">
-      <div class="audio-play-section-heading"><h3>Configuration</h3><span class="audio-play-help">Au prochain Run</span></div>
-      <label>Nom du bloc<input type="text" data-player-title value="{{ node_title }}" maxlength="200" autocomplete="off" required /></label>
+    <section class="audio-play-settings" aria-label="Block configuration">
+      <div class="audio-play-section-heading"><h3>Configuration</h3><span class="audio-play-help">At the next Run</span></div>
+      <label>Block name<input type="text" data-player-title value="{{ node_title }}" maxlength="200" autocomplete="off" required /></label>
       {{ settings_html }}
     </section>
-    <details class="audio-play-disclosure"><summary>Branchement et formats</summary><div class="audio-play-disclosure-body"><p>Reliez la sortie audio de votre source à <code>audio_in</code>. La lecture démarre dès réception : aucun lien data n’est nécessaire.</p><p class="audio-play-help">PCM 16 bits et Opus WebM/Ogg · AAC/MP4 non pris en charge. Activez le son avant de démarrer la source. Avec un micro, utilisez un casque pour éviter le larsen.</p></div></details>
+    <details class="audio-play-disclosure"><summary>Wiring and formats</summary><div class="audio-play-disclosure-body"><p>Wire your source's audio output to <code>audio_in</code>. Playback starts as soon as audio arrives: no data link is required.</p><p class="audio-play-help">16-bit PCM and Opus WebM/Ogg · AAC/MP4 are not supported. Enable the sound before starting the source. With a microphone, use a headset to avoid feedback.</p></div></details>
     <details class="audio-play-disclosure audio-play-diagnostics"><summary>Diagnostic</summary><div class="audio-play-disclosure-body" data-block-modal-error-panel>{{ error_html }}</div></details>
   </div>
-  <footer class="audio-play-actions"><p data-player-feedback role="status" aria-live="polite">Aucune modification.</p><button type="button" class="solid-btn" data-player-apply data-block-mutation-control disabled>Appliquer</button></footer>
+  <footer class="audio-play-actions"><p data-player-feedback role="status" aria-live="polite">No change.</p><button type="button" class="solid-btn" data-player-apply data-block-mutation-control disabled>Apply</button></footer>
 </div>

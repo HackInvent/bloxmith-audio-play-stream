@@ -46,25 +46,25 @@ export function mountControls(root, api) {
       const entry = record();
       const state = entry?.player?.snapshot() || entry?.snapshot;
       if (status) {
-        status.textContent = state?.message || "Lancez Run puis activez le son.";
+        status.textContent = state?.message || "Run, then enable the sound.";
         status.dataset.error = String(Boolean(state?.error));
       }
       if (volume) { volume.disabled = !entry?.player; if (state) volume.value = String(state.volume); }
       if (volumeValue) volumeValue.textContent = state ? `${Math.round(state.volume)} %` : "—";
       if (mute) {
         mute.disabled = !entry?.player;
-        mute.textContent = state?.muted ? "Rétablir le son" : "Couper le son";
+        mute.textContent = state?.muted ? "Unmute" : "Mute";
         mute.setAttribute("aria-pressed", String(Boolean(state?.muted)));
       }
       if (applyButton) {
         applyButton.disabled = busy || !changed() || Boolean(api.isReadOnly?.());
-        applyButton.textContent = busy ? "Application…" : "Appliquer";
+        applyButton.textContent = busy ? "Applying…" : "Apply";
       }
     };
     const announce = (message, error = false) => {
       if (!disposed && feedback) { feedback.textContent = message; feedback.dataset.error = String(error); }
     };
-    const dirty = () => { announce(changed() ? "Modifications non appliquées." : "Aucune modification."); refresh(); };
+    const dirty = () => { announce(changed() ? "Unapplied changes." : "No change."); refresh(); };
     /** Apply one validated snapshot and preserve any newer changes typed during the request. */
     const apply = async () => {
       if (disposed || busy || !changed() || api.isReadOnly?.()) return;
@@ -72,7 +72,7 @@ export function mountControls(root, api) {
       if (invalid) {
         const disclosure = invalid.closest("details");
         if (disclosure) disclosure.open = true;
-        invalid.reportValidity(); announce("Vérifiez le champ signalé.", true); return;
+        invalid.reportValidity(); announce("Check the highlighted field.", true); return;
       }
       const patch = snapshot();
       busy = true;
@@ -81,8 +81,8 @@ export function mountControls(root, api) {
         const result = await api.applyAction("save_properties", patch);
         if (result?.error) throw new Error(result.error);
         saved = JSON.stringify(patch);
-        announce(changed() ? "Enregistré ; des modifications restent à appliquer." : "Appliqué au prochain Run.");
-      } catch (error) { announce(error.message || "Échec de l’enregistrement.", true); }
+        announce(changed() ? "Saved; some changes still need to be applied." : "Applied at the next Run.");
+      } catch (error) { announce(error.message || "Saving failed.", true); }
       finally { busy = false; refresh(); }
     };
     const setVolume = () => record()?.player?.setVolume(Number(volume.value));

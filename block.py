@@ -39,31 +39,31 @@ def _command(raw: Any) -> dict[str, str]:
     """Validate bounded interrupt-only JSON without accepting audio lifecycle stops."""
     if isinstance(raw, str):
         if len(raw.encode("utf-8")) > 4096:
-            raise ValueError("Commande trop volumineuse : 4 Kio maximum.")
+            raise ValueError("Command too large: 4 KiB maximum.")
         try:
             raw = json.loads(raw)
         except (ValueError, RecursionError):
-            raise ValueError('command_in attend exactement {"action":"interrupt"}.') from None
+            raise ValueError('command_in expects exactly {"action":"interrupt"}.') from None
     if not isinstance(raw, Mapping) or set(raw) != {"action"} or raw["action"] != "interrupt":
-        raise ValueError('command_in attend exactement {"action":"interrupt"} ; start/stop ne sont pas des interruptions.')
+        raise ValueError('command_in expects exactly {"action":"interrupt"}; start/stop are not interruptions.')
     return {"action": "interrupt"}
 
 
 def _config(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     """Validate durable initial settings; live browser controls do not mutate them."""
     if raw is not None and not isinstance(raw, Mapping):
-        raise ValueError("Configuration audio invalide.")
+        raise ValueError("Invalid audio configuration.")
     result = {**DEFAULTS, **(raw or {})}
     for key, (minimum, maximum) in BOUNDS.items():
         try:
             value = float(result[key])
         except (ValueError, TypeError) as exc:
-            raise ValueError(f"{key} doit être un nombre.") from exc
+            raise ValueError(f"{key} must be a number.") from exc
         if isinstance(result[key], bool) or not math.isfinite(value) or not minimum <= value <= maximum:
-            raise ValueError(f"{key} doit être compris entre {minimum} et {maximum}.")
+            raise ValueError(f"{key} must be between {minimum} and {maximum}.")
         result[key] = value
     if not isinstance(result["muted"], bool):
-        raise ValueError("Le réglage silence doit être un booléen.")
+        raise ValueError("The mute setting must be a boolean.")
     return {key: result[key] for key in DEFAULTS}
 
 
@@ -87,11 +87,11 @@ class AudioPlayStreamBlock(BlockDefinition):
         ports = {port.id: port for port in context.input_ports}
         if (len(ports) != len(context.input_ports) or set(ports) not in ({1}, {1, 2})
                 or context.output_ports):
-            raise ValueError("Audio Play Stream nécessite audio_in, éventuellement command_in, et aucune sortie.")
+            raise ValueError("Audio Play Stream requires audio_in, optionally command_in, and no output.")
         audio = ports[1]
         if (audio.name != "audio_in" or audio.transport != "audio_stream"
                 or audio.multiplicity != "one" or audio.required):
-            raise ValueError("Audio Play Stream nécessite audio_in, éventuellement command_in, et aucune sortie.")
+            raise ValueError("Audio Play Stream requires audio_in, optionally command_in, and no output.")
         if len(ports) == 2:
             command = ports[2]
             if (command.name != "command_in"
@@ -99,7 +99,7 @@ class AudioPlayStreamBlock(BlockDefinition):
                     or command.multiplicity != "one" or command.required
                     or getattr(command, "execution_requirement", "not_required_for_execution") != "not_required_for_execution"
                     or tuple(command.accepts) != ("application/json",)):
-                raise ValueError("command_in doit rester une entrée JSON facultative à multiplicité un.")
+                raise ValueError("command_in must stay an optional JSON input with multiplicity one.")
 
     def prepare_runtime(self, context: BlockRuntimePreparationContext) -> BlockRuntimePreparation:
         """Validate without IO; keep the active worker alive for the browser host."""
@@ -119,13 +119,13 @@ class AudioPlayStreamBlock(BlockDefinition):
         active = context.runtime_mode == "zeromq_active"
         if command is not None:
             if not active:
-                message = "Simulation : commande interrupt validée, aucune interruption ni lecture audio."
+                message = "Simulation: interrupt command validated, no interruption and no audio playback."
                 return BlockRuntimeResult(status="skipped", outputs=[], last_message=message,
                     logs=[f"[audio-play-stream] {message}"], metadata={self.kind: {
                         "state": "simulation", "command": {**command, "applied": False, "reason": "simulation"}}})
             reset = context.services.get("reset_browser_audio")
             if not callable(reset):
-                message = "La passerelle reset_browser_audio requise par Audio Play Stream est indisponible."
+                message = "The reset_browser_audio gateway required by Audio Play Stream is unavailable."
                 return BlockRuntimeResult(status="failed", outputs=[], last_message=message,
                     error=message, exit_code=1, logs=[f"[audio-play-stream-error] {message}"],
                     metadata={self.kind: {"state": "reset_unavailable",
@@ -133,24 +133,24 @@ class AudioPlayStreamBlock(BlockDefinition):
             try:
                 reset_result = reset()
                 if not isinstance(reset_result, Mapping):
-                    raise RuntimeError("Réponse de reset_browser_audio invalide.")
+                    raise RuntimeError("Invalid reset_browser_audio response.")
                 scheduled = reset_result.get("scheduled_readers")
                 if isinstance(scheduled, bool) or not isinstance(scheduled, int) or scheduled < 0:
-                    raise RuntimeError("Nombre de lecteurs planifiés invalide.")
+                    raise RuntimeError("Invalid scheduled player count.")
             except (RuntimeError, TypeError, ValueError) as exc:
-                message = f"Interruption audio impossible : {exc}"
+                message = f"Audio interruption failed: {exc}"
                 return BlockRuntimeResult(status="failed", outputs=[], last_message=message,
                     error=message, exit_code=1, logs=[f"[audio-play-stream-error] {message}"],
                     metadata={self.kind: {"state": "reset_failed",
                         "command": {**command, "applied": False, "reason": "reset_browser_audio_failed"}}})
-            message = (f"Interruption audio transmise à {scheduled} lecteur"
-                       f"{'s' if scheduled != 1 else ''} navigateur.")
+            message = (f"Audio interruption sent to {scheduled} browser player"
+                       f"{'s' if scheduled != 1 else ''}.")
             return BlockRuntimeResult(status="success", outputs=[], last_message=message,
                 logs=[f"[audio-play-stream] {message}"], metadata={self.kind: {
                     "state": "reset_scheduled", "command": {**command, "applied": True,
                         "scheduled_readers": scheduled}}})
-        message = ("Lecteur prêt dans le navigateur : activez le son puis envoyez un flux."
-                   if active else "Simulation : aucune lecture audio dans le navigateur.")
+        message = ("Player ready in the browser: enable the sound, then send a stream."
+                   if active else "Simulation: no audio playback in the browser.")
         return BlockRuntimeResult(
             status="success" if active else "skipped", outputs=[], last_message=message,
             logs=[f"[audio-play-stream] {message}"],
@@ -165,28 +165,28 @@ class AudioPlayStreamBlock(BlockDefinition):
     def _settings_html(self, node: dict) -> str:
         """Separate initial controls from advanced timing settings, with compact numeric labels."""
         config = _config(node.get("config"))
-        labels = {"volume": "Volume initial (%)", "latency_ms": "Marge de lecture (ms)",
-                  "max_buffer_sec": "File audio maximale (s)"}
+        labels = {"volume": "Initial volume (%)", "latency_ms": "Playback margin (ms)",
+                  "max_buffer_sec": "Maximum audio queue (s)"}
         fields = {key: f'<label>{label}<input type="number" data-player-setting="{key}" '
                   f'value="{escape(format(config[key], "g"), quote=True)}" min="{BOUNDS[key][0]}" '
                   f'max="{BOUNDS[key][1]}" step="any" required /></label>' for key, label in labels.items()}
         checked = " checked" if config["muted"] else ""
         toggle = ('<label class="audio-play-check"><input type="checkbox" '
-                  f'data-player-setting="muted"{checked} /><span>Démarrer en silence</span></label>')
+                  f'data-player-setting="muted"{checked} /><span>Start muted</span></label>')
         return (f'<div class="audio-play-fields">{fields["volume"]}{toggle}</div>'
-                '<details class="audio-play-disclosure audio-play-advanced"><summary>Réglages audio avancés</summary>'
-                '<div class="audio-play-disclosure-body"><p class="audio-play-help">Les valeurs par défaut conviennent pour commencer.</p>'
+                '<details class="audio-play-disclosure audio-play-advanced"><summary>Advanced audio settings</summary>'
+                '<div class="audio-play-disclosure-body"><p class="audio-play-help">The default values are fine to start with.</p>'
                 f'<div class="audio-play-fields">{fields["latency_ms"]}{fields["max_buffer_sec"]}</div></div></details>')
 
     def _command_notice_html(self, node: dict) -> str:
         """Explain browser interruption separately from local mute and durable settings."""
         available = any(port.get("id") == 2 and port.get("name") == "command_in" for port in node.get("inputs", []))
-        detail = ('<code>command_in</code> reconnaît <code>{"action":"interrupt"}</code>. En Runtime actif, '
-                  'la commande arrête immédiatement les sons programmés et vide les buffers de ce lecteur dans chaque navigateur connecté.'
-                  if available else 'Ce bloc possède uniquement audio_in. Recréez-le pour ajouter command_in. '
-                  'Les blocs existants à une entrée continuent de lire normalement, sans commande d’interruption.')
+        detail = ('<code>command_in</code> understands <code>{"action":"interrupt"}</code>. In active Runtime, '
+                  'the command immediately stops the scheduled sounds and clears the buffers of this player in every connected browser.'
+                  if available else 'This block only has audio_in. Recreate it to add command_in. '
+                  'Existing single-input blocks keep playing normally, without an interruption command.')
         return ('<aside class="audio-play-command-note" data-player-command-notice role="note">'
-                '<strong>Interruption immédiate</strong><p>' + detail + '</p></aside>')
+                '<strong>Immediate interruption</strong><p>' + detail + '</p></aside>')
 
     def render_modal(self, *, node: dict, payload: dict | None = None) -> dict:
         """Render an opaque panel with fixed actions, diagnostics and interruption guidance."""
@@ -195,7 +195,7 @@ class AudioPlayStreamBlock(BlockDefinition):
         template = template.replace("{{ command_notice_html }}", self._command_notice_html(node))
         has_error = bool(self._runtime_error_text(payload or {}))
         template = template.replace('<summary>Diagnostic</summary>',
-                                    f'<summary>Diagnostic · {"Erreur" if has_error else "Aucune erreur"}</summary>')
+                                    f'<summary>Diagnostic · {"Error" if has_error else "No error"}</summary>')
         if has_error:
             template = template.replace('class="audio-play-disclosure audio-play-diagnostics"',
                                         'class="audio-play-disclosure audio-play-diagnostics" open')
@@ -217,10 +217,10 @@ class AudioPlayStreamBlock(BlockDefinition):
             try:
                 config = values.get("config", {})
                 if not isinstance(config, dict) or set(config) - set(DEFAULTS):
-                    raise ValueError("Réglages audio inconnus.")
+                    raise ValueError("Unknown audio settings.")
                 title = values.get("title", node.get("title") or self.default_title())
                 if not isinstance(title, str) or not title.strip() or len(title) > 200:
-                    raise ValueError("Le nom doit contenir de 1 à 200 caractères.")
+                    raise ValueError("The name must contain 1 to 200 characters.")
                 normalized = _config({**(node.get("config") or {}), **config})
                 return {"node_patch": {"title": title.strip(), "config": normalized}, "rerender_inspector": False}
             except (ValueError, TypeError) as exc:
