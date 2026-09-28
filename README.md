@@ -8,6 +8,10 @@
 Verified BloxSmith versions: **1.0.9** (bundled-block tests; see [test evidence](compatibility.json)).
 <!-- block-metadata:end -->
 
+[![AUDIO PLAY — Plays an incoming audio stream through the current browser's speakers.](media/thumbnail.webp)](media/cover.png)
+
+*Concept illustration. [Artwork and generation prompt](media/README.md).*
+
 
 Play graph audio in the browser displaying the blueprint. This block owns decoding, playback scheduling, volume and muting. The framework only supplies its generic audio bridge and the page's shared audio context.
 
