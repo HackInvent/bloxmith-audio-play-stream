@@ -22,6 +22,9 @@ import { OpusDemux } from "./opus_demux.js";
     const sources = new Set();
     let stream = null;
     const retired = new Set();
+    const interruptedOpus = new Set();
+    let requireOpusStart = false;
+    let opusProbe = null;
     let decoder = null;
     let decoded = [];
     let decoderError = null;
@@ -31,6 +34,7 @@ import { OpusDemux } from "./opus_demux.js";
     let nextTime = 0;
     let disposed = false;
     let receivedFrames = 0;
+    let discardedFrames = 0;
     let playedSamples = 0;
     let highWaterSeconds = 0;
     let message = "Listening on audio_in.";
@@ -45,6 +49,50 @@ import { OpusDemux } from "./opus_demux.js";
       if (decoderError) throw decoderError;
     }
     const notify = () => ui.notify();
+    const streamKey = frame => JSON.stringify([frame.source_id, frame.stream_id]);
+    /** Remember only a bounded recent interruption history, never audio bytes. */
+    function retireInterruptedOpus(frame) {
+      interruptedOpus.add(streamKey(frame));
+      if (interruptedOpus.size > 128) interruptedOpus.delete(interruptedOpus.values().next().value);
+    }
+    /** Identify fresh container headers after reset, not a source-global sequence.
+     * Keep at most five prefix bytes plus one bounded transport frame while the
+     * signature is split. Full container/header validation remains in OpusDemux.
+     */
+    function recoverOpusFrames(frame) {
+      if (opusProbe && streamKey(opusProbe.frames[0]) !== streamKey(frame)) {
+        retireInterruptedOpus(opusProbe.frames[0]);
+        discardedFrames += opusProbe.frames.length;
+        opusProbe = null;
+      }
+      if (!opusProbe) opusProbe = { frames: [], prefix: new Uint8Array() };
+      const previous = opusProbe.frames.at(-1);
+      requireValue(!previous || (frame.sequence === previous.sequence + 1 && frame.channels === previous.channels
+        && frame.sample_rate_hz === previous.sample_rate_hz), "Missing audio frame, or profile changed mid-stream.");
+      opusProbe.frames.push(frame);
+      const bytes = new Uint8Array(frame.payload);
+      const prefix = new Uint8Array(Math.min(6, opusProbe.prefix.length + bytes.length));
+      prefix.set(opusProbe.prefix);
+      prefix.set(bytes.subarray(0, prefix.length - opusProbe.prefix.length), opusProbe.prefix.length);
+      opusProbe.prefix = prefix;
+      const matches = signature => signature.every((value, index) => index >= prefix.length || prefix[index] === value);
+      const ogg = matches([0x4f, 0x67, 0x67, 0x53]), webm = matches([0x1a, 0x45, 0xdf, 0xa3]);
+      const invalid = (!ogg && !webm) || (ogg && prefix.length >= 6
+        && (prefix[4] !== 0 || !(prefix[5] & 2) || (prefix[5] & 1)));
+      if (invalid) {
+        retireInterruptedOpus(frame);
+        discardedFrames += opusProbe.frames.length;
+        opusProbe = null;
+        return [];
+      }
+      if ((webm && prefix.length >= 4) || (ogg && prefix.length >= 6)) {
+        const frames = opusProbe.frames;
+        opusProbe = null;
+        requireOpusStart = false;
+        return frames;
+      }
+      return [];
+    }
     /** Schedule short PCM buffers; await capacity before ACK instead of growing an unbounded queue. */
     async function schedule(buffer, signal) {
       alive(signal);
@@ -215,13 +263,25 @@ import { OpusDemux } from "./opus_demux.js";
         && frame.sample_rate_hz >= 8000 && frame.sample_rate_hz <= 192000
         && typeof frame.stream_id === "string" && frame.stream_id.length > 0
         && Number.isSafeInteger(frame.sequence) && frame.sequence >= 0, "Invalid audio frame profile.");
-      if (!stream || stream.stream_id !== frame.stream_id) await begin(frame, signal);
-      requireValue(frame.sequence === stream.sequence + 1 && frame.source_id === stream.source_id
-        && frame.codec === stream.codec && frame.channels === stream.channels && frame.sample_rate_hz === stream.sample_rate_hz,
-      "Missing audio frame, or profile changed mid-stream. Restart the playback.");
-      stream.sequence = frame.sequence;
-      if (frame.codec === "pcm_s16le") await pcm(new Uint8Array(frame.payload), stream, signal);
-      else await demux.push(new Uint8Array(frame.payload));
+      let frames = [frame];
+      if (frame.codec === "opus") {
+        // The reset watermark only removes frames already admitted by the
+        // bridge. Producer cancellation can still race with later deliveries.
+        // Those pages cannot be decoded after their headers/decoder were purged.
+        if (interruptedOpus.has(streamKey(frame))) {
+          discardedFrames++;
+          frames = [];
+        } else if (requireOpusStart) frames = recoverOpusFrames(frame);
+      }
+      for (const accepted of frames) {
+        if (!stream || stream.stream_id !== accepted.stream_id) await begin(accepted, signal);
+        requireValue(accepted.sequence === stream.sequence + 1 && accepted.source_id === stream.source_id
+          && accepted.codec === stream.codec && accepted.channels === stream.channels && accepted.sample_rate_hz === stream.sample_rate_hz,
+        "Missing audio frame, or profile changed mid-stream. Restart the playback.");
+        stream.sequence = accepted.sequence;
+        if (accepted.codec === "pcm_s16le") await pcm(new Uint8Array(accepted.payload), stream, signal);
+        else await demux.push(new Uint8Array(accepted.payload));
+      }
       alive(signal);
       receivedFrames++;
       frameDeadline = 0;
@@ -241,6 +301,13 @@ import { OpusDemux } from "./opus_demux.js";
     /** Purge scheduled sound, decoder work and stream state while keeping the receiver alive. */
     function reset() {
       if (disposed) return;
+      if (stream?.codec === "opus") retireInterruptedOpus(stream);
+      if (opusProbe) {
+        retireInterruptedOpus(opusProbe.frames[0]);
+        discardedFrames += opusProbe.frames.length;
+        opusProbe = null;
+      }
+      requireOpusStart = true;
       stopSources();
       closeDecoder();
       stream = null;
@@ -265,13 +332,15 @@ import { OpusDemux } from "./opus_demux.js";
       closeDecoder();
       gain.disconnect();
       demux = null; pcmTail = new Uint8Array(); retired.clear();
+      interruptedOpus.clear();
+      opusProbe = null;
       notify();
     }
     const abort = () => dispose();
     api.signal.addEventListener("abort", abort, { once: true });
     if (api.signal.aborted) dispose();
     const snapshot = () => ({ message, error, volume: config.volume, muted: config.muted,
-      active: !disposed, receivedFrames, playedSamples, highWaterSeconds });
+      active: !disposed, receivedFrames, discardedFrames, playedSamples, highWaterSeconds });
     return { enqueue, reset, dispose, snapshot,
       /** Adjust only this browser's gain; mute continues draining the stream. */
       setVolume(value) {

@@ -99,6 +99,51 @@ async ({ fixtures, references, modal, modules }) => {
     "new audio must resume after reset, including the same stream id");
   interrupted.stop();
 
+  // Reset may race with producer cancellation. A late Opus tail lacks the
+  // discarded headers and must be drained, not decoded or treated as a Run error.
+  const lateOpus = await open();
+  const oldOgg = Uint8Array.from(atob(fixtures.ogg_1), char => char.charCodeAt(0));
+  await lateOpus.send(frame(oldOgg.subarray(0, 47), { codec: "opus", sample_rate_hz: 48000, sequence: 1 }));
+  lateOpus.reset();
+  const cutSamples = lateOpus.state().playedSamples;
+  await lateOpus.send(frame(oldOgg.subarray(47), { codec: "opus", sample_rate_hz: 48000, sequence: 2 }));
+  assert(lateOpus.state().active && !lateOpus.state().error && lateOpus.closes === 0,
+    "late interrupted Opus pages must not close the player");
+  assert(lateOpus.state().playedSamples === cutSamples, "interrupted Opus must not resume speaking");
+  assert(lateOpus.state().discardedFrames === 1, "discarded audio is counted, not labelled played");
+  await lateOpus.send(frame(oldOgg, { codec: "opus", sample_rate_hz: 48000, stream_id: "fresh-answer", sequence: 37 }));
+  assert(lateOpus.state().playedSamples === cutSamples + 48000, "a new headed stream must play after interruption");
+  await lateOpus.send(frame(oldOgg.subarray(47), { codec: "opus", sample_rate_hz: 48000, sequence: 3 }));
+  assert(lateOpus.state().active && lateOpus.state().discardedFrames === 2,
+    "a late old stream must remain discarded after the next answer starts");
+  lateOpus.stop();
+
+  // A reset can arrive before this browser has seen the producer's first page.
+  const resetBeforeHeaders = await open();
+  resetBeforeHeaders.reset();
+  await resetBeforeHeaders.send(frame(oldOgg.subarray(47), { codec: "opus", sample_rate_hz: 48000, sequence: 2 }));
+  assert(resetBeforeHeaders.state().active && resetBeforeHeaders.state().playedSamples === 0,
+    "a headerless old tail following reset must be drained safely");
+  for (let index = 0; index < 7; index++) {
+    await resetBeforeHeaders.send(frame(index < 6 ? oldOgg.subarray(index, index + 1) : oldOgg.subarray(6),
+      { codec: "opus", sample_rate_hz: 48000, stream_id: "new-after-idle", sequence: 50 + index }));
+  }
+  assert(resetBeforeHeaders.state().playedSamples === 48000, "idle reset must not block new Opus streams");
+  resetBeforeHeaders.stop();
+
+  const resetWebM = await open();
+  const oldWebM = Uint8Array.from(atob(fixtures.webm_1), char => char.charCodeAt(0));
+  await resetWebM.send(frame(oldWebM.subarray(0, 100), { codec: "opus", sample_rate_hz: 48000 }));
+  resetWebM.reset();
+  await resetWebM.send(frame(oldWebM.subarray(100), { codec: "opus", sample_rate_hz: 48000, sequence: 1 }));
+  assert(resetWebM.state().active && resetWebM.state().playedSamples === 0, "interrupted WebM tail must be discarded too");
+  for (let index = 0; index < 5; index++) {
+    await resetWebM.send(frame(index < 4 ? oldWebM.subarray(index, index + 1) : oldWebM.subarray(4),
+      { codec: "opus", sample_rate_hz: 48000, stream_id: "fresh-webm", sequence: 100 + index }));
+  }
+  assert(resetWebM.state().playedSamples === 48000, "fresh WebM must remain playable after interruption");
+  resetWebM.stop();
+
   // FB3: Opus Ogg/WebM, mono/stereo, one-byte headers and fragmented container bodies.
   const decodedResults = {};
   const fidelity = {};

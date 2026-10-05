@@ -35,6 +35,21 @@ In Active Runtime the block calls its node-scoped `reset_browser_audio` service.
 
 Simulation validates the command without opening audio and reports `applied: false` with `reason: "simulation"`. Local mute and global Stop retain their existing behavior.
 
+After reset, late pages from an interrupted **Opus** stream are consumed but not
+decoded or played. Producer cancellation and browser reset use separate paths;
+the transport watermark cannot remove audio published afterward. The player
+retains the latest 128 interrupted source/stream identities and counts discarded
+frames separately. It also discards a headerless tail arriving just after reset,
+even if the browser had not yet seen that stream. Playback resumes on a **new
+stream ID with its container headers**. Sequence numbers belong to the producer,
+not the individual utterance: they do not have to restart at 1. A bounded prefix
+probe accepts fragmented Ogg beginning-of-stream or WebM headers after reset,
+then the ordinary demuxer validates the complete container. Cancel/restart
+the Opus producer as well; continuing a single microphone capture cannot restore
+discarded decoder state. PCM needs no container header and keeps its existing
+same-stream continuation behavior. No fallback decoder, silence insertion or
+complete-file buffering is introduced.
+
 ## Formats and limits
 
 - **`pcm_s16le`**: signed, interleaved, little-endian 16-bit PCM; mono/stereo; 8–192 kHz. Every frame must correctly identify its sample rate and channels. Incomplete samples split across frames are buffered.
@@ -87,6 +102,11 @@ Captures are written to ignored results with no hard-coded personal path. FB1–
 A browser MediaRecorder oscillator test covers Run → WebSocket ingress → audio link → WebSocket egress → playback → Stop without opening a modal. Inputs are synthetic: no microphone permission, API key or OpenAI request. Tests inspect scheduled audio buffers, not physical speakers or the user's acoustic environment.
 
 Sample-by-sample comparisons against **libopus through FFmpeg** cover mono/stereo Ogg/WebM and locally synthesized speech using FFmpeg's `flite` filter. Signal-to-error ratio must exceed 60 dB, with gain within 0.1% of the reference, including after a new `stream_id`. This catches the repeated-flush regression that duration or silence checks would miss. Partial decoding, late/invalid outputs, native decoder errors and timeout cancellation are also covered.
+
+Reset regression includes late Ogg/WebM tails, interruption before any headers,
+an obsolete tail after a new answer starts, resumption with fresh headers and
+unchanged PCM continuation. These browser tests inspect actual scheduled samples;
+they do not measure physical speaker latency.
 
 The TTS suite `F5.49_opus_interoperability.py` additionally decodes actual TTS output pages through runtime egress, checking exact duration after pre-skip and final trimming in mono/stereo; only the OpenAI API is simulated.
 
